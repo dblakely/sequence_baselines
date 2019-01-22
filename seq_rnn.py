@@ -1,20 +1,23 @@
 ### seq_rnn.py
-### RNN baseline models for comparisons with igakco
+### RNN baseline models for comparisons with iGakco-SVM
 ### Derrick Blakely, December 2018
 
+### General Imports
 import numpy as np
-import matplotlib  
-matplotlib.use('TkAgg')
+import matplotlib
+matplotlib.use('TkAgg') # Use TkAgg backend; switch if desired/necessary
 from matplotlib import pyplot as plt
 import matplotlib.ticker as ticker
 import sys
+import os
+import shutil
 import random
 import argparse
 from dataset import Dataset
 from tqdm import tqdm, trange
-import os
 from sklearn import metrics
 
+### Torch Imports
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -30,6 +33,8 @@ def get_args():
 		help='number of iterations to train (default: 1000)')
 	parser.add_argument('-lr', '--learning-rate', type=float, default=0.01, metavar='LR',
 		help='learning rate (default: 0.01)')
+	parser.add_argument('-em', '--embed-size', type=float, default=32,
+		help='Size of the embedding space (using char-level embeddings')
 	parser.add_argument('--layers', type=int, default=1, metavar='N',
 		help='Number of RNN layers to stack')
 	parser.add_argument('--bidir', action='store_true', default=False,
@@ -48,8 +53,9 @@ def get_args():
 	parser.add_argument('--tst', type=str, required=True, help='Test file', metavar='1.1.test.fasta')
 	parser.add_argument('--show-graphs', action='store_true', default=False,
 		help='Will show plots of the training and test accuracy and the training loss over time')
-	parser.add_argument('--save-stuff', action='store_true', default=False,
-		help='Will write training and loss histories to a files')
+	parser.add_argument('-od', '--output-directory', type=str,
+		help="""Name of directory to create. Will save data inside the directory.
+				If not provided, logged data will not be saved.""")
 	parser.add_argument('-d', '--dict', required=True, type=str, metavar='dna.dictionary',
 		help='Dictionary file containing all chars that can appear in sequences, 1 per line')
 	
@@ -64,8 +70,10 @@ test_file = args.tst
 iters = args.iters
 log_interval = args.log_interval
 n_layers = args.layers
-bidir = args.bidirectional
+bidir = args.bidir
 BATCH = args.batch
+embed_size = args.embed_size
+lr = args.learning_rate
 PAD_VAL = -1
 
 class History(object):
@@ -75,36 +83,71 @@ class History(object):
 		self.test_acc = []
 		self.loss_iters = []
 		self.losses = []
+		self.auc_iters = []
+		self.train_auc = []
+		self.test_auc = []
+		self.fpr, self.tpr = [], []
 
 	def add_acc(self, iter, train, test):
 		self.acc_iters.append(iter)
 		self.train_acc.append(train)
 		self.test_acc.append(test)
 
+	# training loss (e.g., NLL Loss)
 	def add_loss(self, iter, loss):
 		self.loss_iters.append(iter)
 		self.losses.append(loss)
+
+	# auc-roc
+	def add_auc(self, iter, train, test):
+		self.auc_iters.append(iter)
+		self.train_auc.append(train)
+		self.test_auc.append(test)
+
+	def add_roc_info(self, fpr, tpr):
+		self.fpr = fpr
+		self.tpr = tpr
 
 	def plot_acc(self):
 		plt.plot(self.acc_iters, self.train_acc, label='Train Accuracy')
 		plt.plot(self.acc_iters, self.test_acc, label='Test Accuracy')
 		plt.title('Model Accuracy')
 		plt.ylabel('Accuracy')
-		plt.xlabel('Iteration')
+		plt.xlabel('Training Iteration')
 		plt.legend(['Train', 'Test'], loc='upper left')
 		plt.show()
 
 	def plot_loss(self):
-		plt.plot(self.loss_iters, self.losses, label='NLLL Loss')
+		plt.plot(self.loss_iters, self.losses, label='NLL Loss')
 		plt.title('Model Training Loss')
 		plt.ylabel('Negative Log-Likelihood Loss')
-		plt.xlabel('Iteration')
+		plt.xlabel('Training Iteration')
 		plt.show()
+
+	# test auc vs iters plot (not the ROC curve!)
+	def plot_auc(self):
+		plt.plot(self.auc_iters, self.test_auc, label='Test AUC')
+		plt.title('Test Set AUC-ROC vs Training Iterations')
+		plt.ylabel('AUC-ROC')
+		plt.xlabel('Training Iteration')
+		plt.show()
+	
+	def plot_roc(self):
+		try:
+			plt.plot(self.fpr, self.tpr, label='ROC Curve')
+			plt.title('ROC Curve')
+			plt.ylabel('TPR')
+			plt.xlabel('FPR')
+			plt.show()
+		except:
+			print("Make sure the History add_roc_info() was called first!")
 
 	def save_data(self, file_prefix):
 		train_acc_file = file_prefix + ".train.acc"
 		test_acc_file = file_prefix + ".test.acc"
 		train_loss_file = file_prefix + ".train.loss"
+		auc_vs_iters_file = file_prefix + '.test.auc'
+		roc_file = file_prefix + '.roc'
 		with open(train_acc_file, 'w+') as f:
 			for i, acc in zip(self.acc_iters, self.train_acc):
 				f.write("{} {}\n".format(i, acc))
@@ -114,6 +157,13 @@ class History(object):
 		with open(train_loss_file, 'w+') as f:
 			for i, loss in zip(self.loss_iters, self.losses):
 				f.write("{} {}\n".format(i, loss))
+		with open(auc_vs_iters_file, 'w+') as f:
+			for i, auc in zip(self.auc_iters, self.test_auc):
+				f.write("{} {}\n".format(i, auc))
+		with open(roc_file, 'w+') as f:
+			f.write(' '.join(map(str, self.fpr)))
+			f.write('\n')
+			f.write(' '.join(map(str, self.tpr)))
 
 class SeqRNN(nn.Module):
 	def __init__(self, input_size, hidden_size, output_size, n_layers):
@@ -230,28 +280,34 @@ class SeqLSTM(nn.Module):
 		return (hidden_state, cell_state)
 
 class BetterLSTM(nn.Module):
-	def __init__(self, input_size, hidden_size, output_size, n_layers, bidir=False):
+	# input_size = alphabet_size
+	def __init__(self, input_size, embedding_size, hidden_size, output_size, n_layers=1, bidir=False):
 		super(BetterLSTM, self).__init__()
 		self.input_size = input_size
+		self.embedding_size = embedding_size
 		self.hidden_size = hidden_size
 		self.output_size = output_size
 		self.n_layers = n_layers
 		self.num_dir = 2 if bidir else 1
 
-		self.embed = nn.Embedding(input_size, hidden_size)
+		self.embed = nn.Embedding(num_embeddings=input_size, embedding_dim=embedding_size)
 
 		# w/o embedding
-		self.lstm = nn.LSTM(input_size, hidden_size, num_layers=n_layers)
+		self.lstm = nn.LSTM(input_size=embedding_size, 
+			hidden_size=hidden_size, num_layers=n_layers, bidirectional=bidir)
 		self.fully_connected = nn.Linear(hidden_size, output_size)
 
 	def forward(self, input, h0, c0):
-		output, (h_final, c_final) = self.lstm(input, (h0, c0))
+		embedded = self.embed(input)
+		output, (h_final, c_final) = self.lstm(embedded, (h0, c0))
 		out = self.fully_connected(h_final[-1])
 		return out
 
 	def init_hidden(self, batch):
-		h0 = torch.zeros(self.n_layers * self.num_dir, batch, self.hidden_size, device=device)
-		c0 = torch.zeros(self.n_layers * self.num_dir, batch, self.hidden_size, device=device)
+		h0 = torch.zeros(self.n_layers * self.num_dir, 
+			batch, self.hidden_size, device=device)
+		c0 = torch.zeros(self.n_layers * self.num_dir, 
+			batch, self.hidden_size, device=device)
 		return h0, c0
 
 def train_sample(model, optimizer, loss_function, seq_tensor, label_tensor):
@@ -276,7 +332,6 @@ def batch_train(padded_xs, y_batch, model, opt, loss_function):
 	loss.backward()
 	#nn.utils.clip_grad_norm_(model.parameters(), max_norm=2)
 	#print("loss = ", loss.item())
-	#exit()
 	return out, loss.item()	
 
 def predict(model, sequence):
@@ -328,18 +383,14 @@ def lstm_evaluate(model, samples, labels):
 			true_ys.append(y_true)
 			if y_pred == y_true: correct += 1
 	accuracy = (correct / num_samples) * 100
-	fpr, tpr, thresholds = metrics.roc_curve(true_ys, scores)
+	false_pos_rate, true_pos_rate, thresholds = metrics.roc_curve(true_ys, scores)
 	auc = metrics.roc_auc_score(true_ys, scores)
-	#plt.plot(fpr, tpr, label='ROC Curve')
-	#plt.title('ROC Curve')
-	#plt.ylabel('TPR')
-	#plt.xlabel('FPR')
-	#plt.show()
 	
-	return accuracy, auc
+	return accuracy, auc, false_pos_rate, true_pos_rate
 
 def main():
 	dataset = Dataset(dict_file, train_file, test_file, use_cuda)
+	print("here")
 	xtrain, ytrain = dataset.xtrain, dataset.ytrain
 	xtest, ytest = dataset.xtest, dataset.ytest
 	alphabet_size = dataset.alphabet_size
@@ -350,15 +401,18 @@ def main():
 	print('device = %s' % device)
 	num_classes = 2
 
-	model = BetterLSTM(input_size=alphabet_size, hidden_size=hidden_size,
-		output_size=num_classes, n_layers=n_layers, bidir=bidir).to(device)
-	opt = optim.SGD(model.parameters(), lr=args.learning_rate)
+	model = BetterLSTM(input_size=alphabet_size, embedding_size=embed_size,
+		hidden_size=hidden_size, output_size=num_classes,
+		n_layers=n_layers, bidir=bidir).to(device)
+	opt = optim.SGD(model.parameters(), lr=lr)
 	loss_function = F.cross_entropy
 
 	iters = args.iters
 	log_interval = args.log_interval
 	hist = History()
 	interval_loss = 0
+
+	train_acc = test_acc = train_auc = test_auc = 0
 
 	for i in trange(1, iters + 1):
 		opt.zero_grad()
@@ -377,75 +431,43 @@ def main():
 			avg_loss = interval_loss / log_interval
 			hist.add_loss(i, avg_loss)
 			interval_loss = 0
-			train_acc, train_auc = lstm_evaluate(model, dataset.xtrain, dataset.ytrain)
-			test_acc, test_auc = lstm_evaluate(model, dataset.xtest, dataset.ytest)
+			train_acc, train_auc, _, _ = lstm_evaluate(model, dataset.xtrain, dataset.ytrain)
+			test_acc, test_auc, fpr, tpr = lstm_evaluate(model, dataset.xtest, dataset.ytest)
 			hist.add_acc(i, train_acc, test_acc)
-			print("Iter {}: train acc = {}, test_acc = {}, train loss = {}, train auc = {}, test auc = {}".format(i, train_acc, test_acc, avg_loss, train_auc, test_auc))
-
-		if args.show_graphs:
-			hist.plot_acc()
-			hist.plot_loss()
-
-		if args.save_stuff:
-			file_prefix = "lstm_{}_{}".format(n_layers, hidden_size)
-			hist.save_data(file_prefix)
-
-def old_main():
-	global iters, log_interval
-
-	dataset = Dataset(dict_file, train_file, test_file, use_cuda)
-	xtrain, ytrain = dataset.xtrain, dataset.ytrain
-	xtest, ytest = dataset.xtest, dataset.ytest
-	alphabet_size = dataset.alphabet_size
-	num_train = len(xtrain)
-	num_test = len(xtest)
-	print('training size: %d' % num_train)
-	print('test size: %d' % num_test)
-	print('device = %s' % device)
-
-	hidden_size = args.hidden
-	num_classes = 2
-
-	model = SeqGRU(input_size=alphabet_size, hidden_size=hidden_size, 
-		output_size=num_classes, n_layers=n_layers).to(device)
-	opt = optim.SGD(model.parameters(), lr=args.learning_rate)
-	loss_function = nn.NLLLoss()
-	#loss_function = nn.BCELoss()
-
-	print("%d iterations --> ~ %s epochs" % (iters, iters / num_train))
-
-	log_interval = args.log_interval
-	iters = args.iters
-	hist = History()
-
-	interval_loss = 0
-
-	for i in trange(1, iters + 1):
-		xbatch, ybatch = dataset.get_batch(BATCH, training_data=True)
-		#xbatch = torch.stack(xbatch, dim=0)
-		padded_xbatch = nn.utils.rnn.pad_sequence(xbatch, padding_value=PAD_VAL)
-		targets_tensor = torch.stack(ybatch).squeeze(1)
-
-		out, loss = batch_train(padded_xbatch, targets_tensor, model, opt, loss_function)
-		
-		interval_loss += loss
-		
-		if i % log_interval == 0:
-			avg_loss = interval_loss / log_interval
-			hist.add_loss(i, avg_loss)
-			interval_loss = 0
-			train_acc = evaluate(model, dataset.xtrain, dataset.ytrain)
-			test_acc = evaluate(model, dataset.xtest, dataset.ytest)
-			hist.add_acc(i, train_acc, test_acc)
-			print("Iter %d: train acc = %s, test acc = %s, loss = %s" % (i, train_acc, test_acc, avg_loss))
+			hist.add_auc(i, train_auc, test_auc)
+			hist.add_roc_info(fpr, tpr)
+			summary = ("Iter {}\ntrain acc = {}\ntest_acc = {}\n"
+				"train loss = {}\ntrain auc = {}\n"
+				"test auc = {}\n".format(i, train_acc, test_acc, avg_loss, train_auc, test_auc))
+			print(summary)
 
 	if args.show_graphs:
 		hist.plot_acc()
 		hist.plot_loss()
+		hist.plot_auc()
+		hist.plot_roc()
 
-	if args.save_stuff:
-		file_prefix = "gru_{}_{}".format(n_layers, hidden_size)
+	# if output_directory specified, write data for future viewing
+	# otherwise, it'll be discarded
+	if args.output_directory is not None:
+		path = args.output_directory
+		if os.path.exists(path):
+			shutil.rmtree(path)
+		os.makedirs(path)
+		file_prefix = "model"
+		file_prefix = os.path.join(path, file_prefix)
 		hist.save_data(file_prefix)
+		summary_file = os.path.join(path, 'about.txt')
+		summary = (
+			"algo: lstm\nlayers: {}\n"
+			"bidir: {}\nlr: {}\noptimizier: SGD\n"
+			"iters: {}\ntrain: {}\ntest: {}\n"
+			"train acc: {}\ntest acc: {}\n"
+			"train auc: {}\ntest auc: {}\n".format(n_layers, bidir, lr,
+				iters, train_file, test_file, train_acc, test_acc, 
+				test_auc, train_auc))
+		with open(summary_file, 'w+') as f:
+			f.write(summary)
 
 if __name__ == '__main__':
 	main()

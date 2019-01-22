@@ -13,8 +13,10 @@ class Dataset(object):
 		self.dictionary = self.get_dict(dictionary_file)
 		self.alphabet_size = len(self.dictionary)
 		assert self.alphabet_size > 0
-		self.xtrain, self.ytrain = self.prepare_data(train_file)
-		self.xtest, self.ytest = self.prepare_data(test_file)
+		#self.xtrain, self.ytrain = self.prepare_data(train_file)
+		#self.xtest, self.ytest = self.prepare_data(test_file)
+		self.xtrain, self.ytrain = self.prepare_data_for_embedding(train_file)
+		self.xtest, self.ytest = self.prepare_data_for_embedding(test_file)
 		self.n_train = len(self.xtrain)
 		self.n_test = len(self.xtest)
 
@@ -69,6 +71,29 @@ class Dataset(object):
 					one_hot_seqs.append(one_hot_seq)
 		assert len(one_hot_seqs) == len(labels)
 		return one_hot_seqs, labels
+
+	# represent sequences as tensor of character indexes
+	# instead of list of one-hot encoded vectors
+	# I.e., what to use if using an embedding layer in the RNN
+	def prepare_data_for_embedding(self, datafile):
+		numerical_seqs = []
+		labels = []
+		with open(datafile, 'r', encoding='utf-8') as f:
+			for line in f:
+				line = line.strip().lower().replace(' ', '')
+				length = len(line)
+				if line[0] == '>':
+					assert length == 2
+					label = int(line[1])
+					label_tensor = torch.tensor([label], dtype=torch.long, device=self.device)
+					labels.append(label_tensor)
+				else:
+					seq = list(line)
+					seq = [self.char_to_index(char) for char in seq]
+					seq = torch.tensor(seq, dtype=torch.long, device=self.device)
+					numerical_seqs.append(seq)
+		assert len(numerical_seqs) == len(labels)
+		return numerical_seqs, labels
 
 	def get_batch(self, batch, training_data=True):
 		xbatch = []
