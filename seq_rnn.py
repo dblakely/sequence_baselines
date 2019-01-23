@@ -4,13 +4,17 @@
 
 ### General Imports
 import numpy as np
+import os
+import sys
+import shutil
 import matplotlib
-matplotlib.use('TkAgg') # Use TkAgg backend; switch if desired/necessary
+# A less ad hoc way of setting these backends would be nice
+if os.environ['HOME'] == "/Users/derrick":
+	matplotlib.use('TkAgg') # Need to use TkAgg backend for my machine
+else:
+	matplotlib.use('Agg') # Need to use Agg backend for the qdata nodes
 from matplotlib import pyplot as plt
 import matplotlib.ticker as ticker
-import sys
-import os
-import shutil
 import random
 import argparse
 from dataset import Dataset
@@ -33,7 +37,7 @@ def get_args():
 		help='number of iterations to train (default: 1000)')
 	parser.add_argument('-lr', '--learning-rate', type=float, default=0.01, metavar='LR',
 		help='learning rate (default: 0.01)')
-	parser.add_argument('-em', '--embed-size', type=float, default=32,
+	parser.add_argument('-em', '--embed-size', type=int, default=32,
 		help='Size of the embedding space (using char-level embeddings')
 	parser.add_argument('--layers', type=int, default=1, metavar='N',
 		help='Number of RNN layers to stack')
@@ -108,37 +112,50 @@ class History(object):
 		self.fpr = fpr
 		self.tpr = tpr
 
-	def plot_acc(self):
+	def plot_acc(self, show=False, path=None):
 		plt.plot(self.acc_iters, self.train_acc, label='Train Accuracy')
 		plt.plot(self.acc_iters, self.test_acc, label='Test Accuracy')
 		plt.title('Model Accuracy')
 		plt.ylabel('Accuracy')
 		plt.xlabel('Training Iteration')
 		plt.legend(['Train', 'Test'], loc='upper left')
-		plt.show()
+		if show: plt.show()
+		if path is not None:
+			file_name = os.path.join(path, 'accuracy.pdf')
+			plt.savefig(file_name)
 
-	def plot_loss(self):
+
+	def plot_loss(self, show=False, path=None):
 		plt.plot(self.loss_iters, self.losses, label='NLL Loss')
 		plt.title('Model Training Loss')
 		plt.ylabel('Negative Log-Likelihood Loss')
 		plt.xlabel('Training Iteration')
-		plt.show()
+		if show: plt.show()
+		if path is not None:
+			file_name = os.path.join(path, 'loss.pdf')
+			plt.savefig(file_name)
 
 	# test auc vs iters plot (not the ROC curve!)
-	def plot_auc(self):
+	def plot_auc(self, show=False, path=None):
 		plt.plot(self.auc_iters, self.test_auc, label='Test AUC')
 		plt.title('Test Set AUC-ROC vs Training Iterations')
 		plt.ylabel('AUC-ROC')
 		plt.xlabel('Training Iteration')
-		plt.show()
+		if show: plt.show()
+		if path is not None:
+			file_name = os.path.join(path, 'auc.pdf')
+			plt.savefig(file_name)
 	
-	def plot_roc(self):
+	def plot_roc(self, show=False, path=None):
 		try:
 			plt.plot(self.fpr, self.tpr, label='ROC Curve')
 			plt.title('ROC Curve')
 			plt.ylabel('TPR')
 			plt.xlabel('FPR')
-			plt.show()
+			if show: plt.show()
+			if path is not None:
+				file_name = os.path.join(path, 'roc.pdf')
+				plt.savefig(file_name)
 		except:
 			print("Make sure the History add_roc_info() was called first!")
 
@@ -441,12 +458,6 @@ def main():
 				"test auc = {}\n".format(i, train_acc, test_acc, avg_loss, train_auc, test_auc))
 			print(summary)
 
-	if args.show_graphs:
-		hist.plot_acc()
-		hist.plot_loss()
-		hist.plot_auc()
-		hist.plot_roc()
-
 	# if output_directory specified, write data for future viewing
 	# otherwise, it'll be discarded
 	if args.output_directory is not None:
@@ -459,15 +470,26 @@ def main():
 		hist.save_data(file_prefix)
 		summary_file = os.path.join(path, 'about.txt')
 		summary = (
-			"algo: lstm\nlayers: {}\n"
+			"algo: lstm\nlayers: {}\nembed_size: {}\n"
 			"bidir: {}\nlr: {}\noptimizier: SGD\n"
 			"iters: {}\ntrain: {}\ntest: {}\n"
 			"train acc: {}\ntest acc: {}\n"
-			"train auc: {}\ntest auc: {}\n".format(n_layers, bidir, lr,
+			"train auc: {}\ntest auc: {}\n".format(n_layers, embed_size, bidir, lr,
 				iters, train_file, test_file, train_acc, test_acc, 
 				test_auc, train_auc))
 		with open(summary_file, 'w+') as f:
 			f.write(summary)
+
+		hist.plot_acc(show=False, path=path)
+		hist.plot_loss(show=False, path=path)
+		hist.plot_auc(show=False, path=path)
+		hist.plot_roc(show=False, path=path)
+
+	if args.show_graphs:
+		hist.plot_acc(show=True)
+		hist.plot_loss(show=True)
+		hist.plot_auc(show=True)
+		hist.plot_roc(show=True)
 
 if __name__ == '__main__':
 	main()
