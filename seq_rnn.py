@@ -20,6 +20,7 @@ import argparse
 from dataset import Dataset
 from tqdm import tqdm, trange
 from sklearn import metrics
+import datetime
 
 ### Torch Imports
 import torch
@@ -506,8 +507,12 @@ def main():
 		file_prefix = os.path.join(path, file_prefix)
 		hist.save_data(file_prefix)
 		summary_file = os.path.join(path, 'about.txt')
-
+		
 		with open(summary_file, 'w+') as f:
+			now = datetime.datetime.now()
+			f.write(now.strftime('%Y-%m-%d %H:%M') + '\n')
+			f.write('command_used: python ' + ' '.join(sys.argv) + '\n')
+			f.write('(may have included CUDA_VISIBLE_DEVICES=x first)\n\n')
 			for key, value in sorted(parameters.items()):
 				f.write(key + ': ' + str(value) + '\n')
 
