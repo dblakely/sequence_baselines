@@ -53,6 +53,8 @@ def get_args():
 		help='how many iterations to wait before logging training status')
 	parser.add_argument('--save-model', action='store_true', default=False,
 		help='For Saving the current Model')
+	parser.add_argument('--opt', choices=['adagrad', 'adam', 'sgd'], default='sgd',
+		help='Which optimizers to use. Options are Adagrad, Adam, SGD')
 	parser.add_argument('--trn', type=str, required=True, help='Training file', metavar='1.1.train.fasta')
 	parser.add_argument('--tst', type=str, required=True, help='Test file', metavar='1.1.test.fasta')
 	parser.add_argument('--show-graphs', action='store_true', default=False,
@@ -67,6 +69,10 @@ def get_args():
 
 args = get_args()
 use_cuda = not args.no_cuda and torch.cuda.is_available()
+
+'''Change visible devices with:
+$ CUDA_VISIBLE_DEVICES=0 python seq_rnn.py [args]
+'''
 device = torch.device('cuda' if use_cuda else 'cpu')
 dict_file = args.dict
 train_file = args.trn
@@ -123,7 +129,7 @@ class History(object):
 		if path is not None:
 			file_name = os.path.join(path, 'accuracy.pdf')
 			plt.savefig(file_name)
-
+			plt.clf()
 
 	def plot_loss(self, show=False, path=None):
 		plt.plot(self.loss_iters, self.losses, label='NLL Loss')
@@ -134,6 +140,7 @@ class History(object):
 		if path is not None:
 			file_name = os.path.join(path, 'loss.pdf')
 			plt.savefig(file_name)
+			plt.clf()
 
 	# test auc vs iters plot (not the ROC curve!)
 	def plot_auc(self, show=False, path=None):
@@ -145,6 +152,7 @@ class History(object):
 		if path is not None:
 			file_name = os.path.join(path, 'auc.pdf')
 			plt.savefig(file_name)
+			plt.clf()
 	
 	def plot_roc(self, show=False, path=None):
 		try:
@@ -156,6 +164,7 @@ class History(object):
 			if path is not None:
 				file_name = os.path.join(path, 'roc.pdf')
 				plt.savefig(file_name)
+				plt.clf()
 		except:
 			print("Make sure the History add_roc_info() was called first!")
 
@@ -406,8 +415,8 @@ def lstm_evaluate(model, samples, labels):
 	return accuracy, auc, false_pos_rate, true_pos_rate
 
 def main():
+	parameters = {}
 	dataset = Dataset(dict_file, train_file, test_file, use_cuda)
-	print("here")
 	xtrain, ytrain = dataset.xtrain, dataset.ytrain
 	xtest, ytest = dataset.xtest, dataset.ytest
 	alphabet_size = dataset.alphabet_size
@@ -418,14 +427,37 @@ def main():
 	print('device = %s' % device)
 	num_classes = 2
 
+	parameters['algorithm'] = 'lstm'
+	parameters['train set'] = train_file
+	parameters['test set'] = test_file
+	parameters['dictionary file'] = dict_file
+	parameters['cuda'] = use_cuda
+	parameters['bidir'] = bidir
+	parameters['layers'] = n_layers
+	parameters['embedding size'] = embed_size
+	parameters['learning rate'] = lr
+
 	model = BetterLSTM(input_size=alphabet_size, embedding_size=embed_size,
 		hidden_size=hidden_size, output_size=num_classes,
 		n_layers=n_layers, bidir=bidir).to(device)
-	opt = optim.SGD(model.parameters(), lr=lr)
+
+	if args.opt == 'adagrad':
+		opt = optim.Adagrad(model.parameters(), lr=lr)
+	elif args.opt == 'adam':
+		opt = optim.Adam(model.parameters(), lr=lr)
+	else:
+		opt = optim.SGD(model.parameters(), lr=lr)
+
 	loss_function = F.cross_entropy
+
+	parameters['optimizer'] = args.opt
+	parameters['loss function'] = 'cross entropy'
 
 	iters = args.iters
 	log_interval = args.log_interval
+
+	parameters['iterations'] = iters
+
 	hist = History()
 	interval_loss = 0
 
@@ -458,6 +490,11 @@ def main():
 				"test auc = {}\n".format(i, train_acc, test_acc, avg_loss, train_auc, test_auc))
 			print(summary)
 
+	parameters['accuracy test'] = test_acc
+	parameters['accuracy train'] = train_acc
+	parameters['auc test'] = test_auc
+	parameters['auc train'] = train_auc
+
 	# if output_directory specified, write data for future viewing
 	# otherwise, it'll be discarded
 	if args.output_directory is not None:
@@ -469,16 +506,10 @@ def main():
 		file_prefix = os.path.join(path, file_prefix)
 		hist.save_data(file_prefix)
 		summary_file = os.path.join(path, 'about.txt')
-		summary = (
-			"algo: lstm\nlayers: {}\nembed_size: {}\n"
-			"bidir: {}\nlr: {}\noptimizier: SGD\n"
-			"iters: {}\ntrain: {}\ntest: {}\n"
-			"train acc: {}\ntest acc: {}\n"
-			"train auc: {}\ntest auc: {}\n".format(n_layers, embed_size, bidir, lr,
-				iters, train_file, test_file, train_acc, test_acc, 
-				test_auc, train_auc))
+
 		with open(summary_file, 'w+') as f:
-			f.write(summary)
+			for key, value in sorted(parameters.items()):
+				f.write(key + ': ' + str(value) + '\n')
 
 		hist.plot_acc(show=False, path=path)
 		hist.plot_loss(show=False, path=path)
