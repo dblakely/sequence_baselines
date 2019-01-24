@@ -215,6 +215,8 @@ class Evaluation(object):
 		preds = []
 		scores = []
 
+
+
 		with torch.no_grad():
 			for x, y in zip(samples, labels):
 				x = x.unsqueeze(1)
@@ -234,8 +236,13 @@ class Evaluation(object):
 		self.increasing_fprs, self.increasing_tprs, thresholds = metrics.roc_curve(true_ys, scores)
 		self.auc = metrics.roc_auc_score(true_ys, scores)
 
+		# true positive rate/sensitvity
+		self.tpr = 100 * self.confusion[1][1] / (self.confusion[1][0] + self.confusion[1][1])
+		# true negative rate/specificity
+		self.tnr = 100 * self.confusion[0][0] / (self.confusion[0][0] + self.confusion[0][1])
+
 	def show_confusion(self):
-		print(self.confusion)
+		print(str(self.confusion) + '\n')
 
 	def plot_confusion(self, show=False, path=None):
 		dataframe = pd.DataFrame(self.confusion, index=['y = 0', 'y = 1'],
@@ -380,11 +387,13 @@ class BetterLSTM(nn.Module):
 		self.lstm = nn.LSTM(input_size=embedding_size, 
 			hidden_size=hidden_size, num_layers=n_layers, bidirectional=bidir)
 		self.fully_connected = nn.Linear(hidden_size, output_size)
+		self.softmax = self.softmax = nn.LogSoftmax(dim=1)
 
 	def forward(self, input, h0, c0):
 		embedded = self.embed(input)
 		output, (h_final, c_final) = self.lstm(embedded, (h0, c0))
 		out = self.fully_connected(h_final[-1])
+		
 		return out
 
 	def init_hidden(self, batch):
@@ -558,15 +567,23 @@ def main():
 			hist.add_auc(i, train_eval.auc, test_eval.auc)
 			hist.add_roc_info(test_eval.increasing_fprs, 
 				test_eval.increasing_tprs)
-			summary = ("Iter {}\ntrain acc = {}\ntest_acc = {}\n"
-				"train loss = {}\ntrain auc = {}\n"
-				"test auc = {}\n".format(i, train_eval.accuracy, 
-					test_eval.accuracy, avg_loss, train_eval.auc, 
-					test_eval.auc))
+			summary = ("Iter {}\ntrain acc = {}\ntest acc = {}\n"
+				"TPR/sensitvity/recall = {}\nTNR/specificity = {}\n"
+				"train loss = {}\nAUC-ROC = {}".format(i, train_eval.accuracy, 
+					test_eval.accuracy, test_eval.tpr, test_eval.tnr,
+					avg_loss, test_eval.auc))
 			print(summary)
+			print("Confusion:")
+			test_eval.show_confusion()
 
 	final_train_eval = Evaluation(model, dataset.xtrain, dataset.ytrain)
 	final_test_eval = Evaluation(model, dataset.xtest, dataset.ytest)
+
+	summary = ("Final Eval:\ntrain acc = {}\ntest acc = {}\n"
+		"TPR/sensitvity/recall = {}\nTNR/specificity = {}"
+		"\nAUC-ROC = {}".format(train_eval.accuracy, 
+		test_eval.accuracy, test_eval.tpr, test_eval.tnr, test_eval.auc))
+	print(summary)
 
 	final_test_eval.show_confusion()
 
@@ -574,6 +591,8 @@ def main():
 	parameters['accuracy train'] = final_train_eval.accuracy
 	parameters['auc test'] = final_test_eval.auc
 	parameters['auc train'] = final_train_eval.auc
+	parameters['TPR/sensitvity/recall'] = final_test_eval.tpr
+	parameters['TNR/specificity'] = final_test_eval.tnr
 
 	# if output_directory specified, write data for future viewing
 	# otherwise, it'll be discarded
