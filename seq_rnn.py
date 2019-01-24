@@ -21,6 +21,8 @@ from dataset import Dataset
 from tqdm import tqdm, trange
 from sklearn import metrics
 import datetime
+import seaborn as sn
+import pandas as pd
 
 ### Torch Imports
 import torch
@@ -109,12 +111,13 @@ class History(object):
 		self.loss_iters.append(iter)
 		self.losses.append(loss)
 
-	# auc-roc
+	# for plotting changes in auc-roc over time
 	def add_auc(self, iter, train, test):
 		self.auc_iters.append(iter)
 		self.train_auc.append(train)
 		self.test_auc.append(test)
 
+	# data needed for plotting a single ROC
 	def add_roc_info(self, fpr, tpr):
 		self.fpr = fpr
 		self.tpr = tpr
@@ -143,7 +146,8 @@ class History(object):
 			plt.savefig(file_name)
 			plt.clf()
 
-	# test auc vs iters plot (not the ROC curve!)
+	# test auc vs iters plot
+	# shows changes in auc-roc over time (not an ROC curve itself)
 	def plot_auc(self, show=False, path=None):
 		plt.plot(self.auc_iters, self.test_auc, label='Test AUC')
 		plt.title('Test Set AUC-ROC vs Training Iterations')
@@ -155,6 +159,7 @@ class History(object):
 			plt.savefig(file_name)
 			plt.clf()
 	
+	# an actual ROC
 	def plot_roc(self, show=False, path=None):
 		try:
 			plt.plot(self.fpr, self.tpr, label='ROC Curve')
@@ -191,6 +196,58 @@ class History(object):
 			f.write(' '.join(map(str, self.fpr)))
 			f.write('\n')
 			f.write(' '.join(map(str, self.tpr)))
+
+class Evaluation(object):
+	def __init__(self, model, samples, labels):
+		"""
+		Arguments
+		---------
+		model: an LSTM
+		samples: array of test or train tensors
+		labels: array of label tensors
+		"""
+
+		num_samples = len(samples)
+		assert num_samples == len(labels)
+		
+		num_correct = 0
+		true_ys = []
+		preds = []
+		scores = []
+
+		with torch.no_grad():
+			for x, y in zip(samples, labels):
+				x = x.unsqueeze(1)
+				y = y.item()
+
+				h0, c0 = model.init_hidden(batch=1)
+				out = model(x, h0, c0)
+				scores.append(torch.max(out).item())
+				y_pred = out.argmax(dim=-1).item()
+				preds.append(y_pred)
+				true_ys.append(y)
+				if y_pred == y: num_correct += 1
+
+		self.accuracy = (num_correct / num_samples) * 100
+		self.confusion = metrics.confusion_matrix(true_ys, preds)
+
+		self.increasing_fprs, self.increasing_tprs, thresholds = metrics.roc_curve(true_ys, scores)
+		self.auc = metrics.roc_auc_score(true_ys, scores)
+
+	def show_confusion(self):
+		print(self.confusion)
+
+	def plot_confusion(self, show=False, path=None):
+		dataframe = pd.DataFrame(self.confusion, index=['y = 0', 'y = 1'],
+			columns=['y_pred = 0', 'y_pred = 1'])
+		sn.set(font_scale=1.4)
+		heatmap = sn.heatmap(dataframe, annot=True, annot_kws={'size': 16})
+		fig = heatmap.get_figure()
+		if show:
+			plt.show()
+		if path is not None:
+			file_name = os.path.join(path, 'confusion.pdf')
+			fig.savefig(file_name)
 
 class SeqRNN(nn.Module):
 	def __init__(self, input_size, hidden_size, output_size, n_layers):
@@ -399,6 +456,10 @@ def lstm_evaluate(model, samples, labels):
 	correct = 0
 	true_ys = []
 	scores = []
+	predictions = []
+	true_neg = false_neg = false_pos = true_pos = 0
+	num_neg = num_pos = 0
+
 	with torch.no_grad():
 		for x, y in zip(samples, labels):
 			x = x.unsqueeze(1)
@@ -406,14 +467,24 @@ def lstm_evaluate(model, samples, labels):
 			out = model(x, h0, c0)
 			scores.append(torch.max(out).item())
 			y_pred = out.argmax(dim=-1).item()
+			predictions.append(y_pred)
 			y_true = y.item()
 			true_ys.append(y_true)
 			if y_pred == y_true: correct += 1
+
 	accuracy = (correct / num_samples) * 100
-	false_pos_rate, true_pos_rate, thresholds = metrics.roc_curve(true_ys, scores)
+	confusion = metrics.confusion_matrix(true_ys, predictions)
+
+	'''metrics.roc_curve returns: 
+	* fpr = array of increasing false pos rates
+	* tpr = array of increasing true pos rates
+	* thresholds = array of decreasing thresholds on the decision function
+		used to compute the fpr and tpr
+	'''
+	increasing_fprs, increasing_tprs, thresholds = metrics.roc_curve(true_ys, scores)
 	auc = metrics.roc_auc_score(true_ys, scores)
 	
-	return accuracy, auc, false_pos_rate, true_pos_rate
+	return accuracy, increasing_fprs, increasing_tprs
 
 def main():
 	parameters = {}
@@ -462,8 +533,6 @@ def main():
 	hist = History()
 	interval_loss = 0
 
-	train_acc = test_acc = train_auc = test_auc = 0
-
 	for i in trange(1, iters + 1):
 		opt.zero_grad()
 		rand = random.randint(0, num_train - 1)
@@ -481,20 +550,30 @@ def main():
 			avg_loss = interval_loss / log_interval
 			hist.add_loss(i, avg_loss)
 			interval_loss = 0
-			train_acc, train_auc, _, _ = lstm_evaluate(model, dataset.xtrain, dataset.ytrain)
-			test_acc, test_auc, fpr, tpr = lstm_evaluate(model, dataset.xtest, dataset.ytest)
-			hist.add_acc(i, train_acc, test_acc)
-			hist.add_auc(i, train_auc, test_auc)
-			hist.add_roc_info(fpr, tpr)
+			
+			train_eval = Evaluation(model, dataset.xtrain, dataset.ytrain)
+			test_eval = Evaluation(model, dataset.xtest, dataset.ytest)
+
+			hist.add_acc(i, train_eval.accuracy, test_eval.accuracy)
+			hist.add_auc(i, train_eval.auc, test_eval.auc)
+			hist.add_roc_info(test_eval.increasing_fprs, 
+				test_eval.increasing_tprs)
 			summary = ("Iter {}\ntrain acc = {}\ntest_acc = {}\n"
 				"train loss = {}\ntrain auc = {}\n"
-				"test auc = {}\n".format(i, train_acc, test_acc, avg_loss, train_auc, test_auc))
+				"test auc = {}\n".format(i, train_eval.accuracy, 
+					test_eval.accuracy, avg_loss, train_eval.auc, 
+					test_eval.auc))
 			print(summary)
 
-	parameters['accuracy test'] = test_acc
-	parameters['accuracy train'] = train_acc
-	parameters['auc test'] = test_auc
-	parameters['auc train'] = train_auc
+	final_train_eval = Evaluation(model, dataset.xtrain, dataset.ytrain)
+	final_test_eval = Evaluation(model, dataset.xtest, dataset.ytest)
+
+	final_test_eval.show_confusion()
+
+	parameters['accuracy test'] = final_test_eval.accuracy
+	parameters['accuracy train'] = final_train_eval.accuracy
+	parameters['auc test'] = final_test_eval.auc
+	parameters['auc train'] = final_train_eval.auc
 
 	# if output_directory specified, write data for future viewing
 	# otherwise, it'll be discarded
@@ -520,12 +599,14 @@ def main():
 		hist.plot_loss(show=False, path=path)
 		hist.plot_auc(show=False, path=path)
 		hist.plot_roc(show=False, path=path)
+		final_test_eval.plot_confusion(show=False, path=path)
 
 	if args.show_graphs:
 		hist.plot_acc(show=True)
 		hist.plot_loss(show=True)
 		hist.plot_auc(show=True)
 		hist.plot_roc(show=True)
+		final_test_eval.plot_confusion(show=True)
 
 if __name__ == '__main__':
 	main()
