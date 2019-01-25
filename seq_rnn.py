@@ -215,8 +215,6 @@ class Evaluation(object):
 		preds = []
 		scores = []
 
-
-
 		with torch.no_grad():
 			for x, y in zip(samples, labels):
 				x = x.unsqueeze(1)
@@ -224,7 +222,9 @@ class Evaluation(object):
 
 				h0, c0 = model.init_hidden(batch=1)
 				out = model(x, h0, c0)
-				scores.append(torch.max(out).item())
+				#score = torch.max(out).item()
+				pos_score = out[0][1].item()
+				scores.append(pos_score)
 				y_pred = out.argmax(dim=-1).item()
 				preds.append(y_pred)
 				true_ys.append(y)
@@ -264,7 +264,7 @@ class SeqRNN(nn.Module):
 			out_features=hidden_size)
 		self.i2o = nn.Linear(in_features=input_size + hidden_size, 
 			out_features=output_size)
-		self.softmax = nn.LogSoftmax(dim=1)
+		self.softmax = nn.Softmax(dim=1)
 
 	def forward(self, input, hidden):
 		# input ~ (batch, alphabet_size); hidden ~ (batch, hidden_size)
@@ -380,20 +380,28 @@ class BetterLSTM(nn.Module):
 		self.output_size = output_size
 		self.n_layers = n_layers
 		self.num_dir = 2 if bidir else 1
+		self.hidden = self.init_hidden(batch=1)
 
 		self.embed = nn.Embedding(num_embeddings=input_size, embedding_dim=embedding_size)
 
-		# w/o embedding
 		self.lstm = nn.LSTM(input_size=embedding_size, 
 			hidden_size=hidden_size, num_layers=n_layers, bidirectional=bidir)
 		self.fully_connected = nn.Linear(hidden_size, output_size)
-		self.softmax = self.softmax = nn.LogSoftmax(dim=1)
+		self.softmax = nn.LogSoftmax(dim=1) 
 
 	def forward(self, input, h0, c0):
+		'''
 		embedded = self.embed(input)
-		output, (h_final, c_final) = self.lstm(embedded, (h0, c0))
+		lstm_out, self.hidden = self.lstm(embedded, self.hidden)
+		out = self.fully_connected(lstm_out[-1])
+		scores = self.softmax(out)
+		return scores
+		'''
+		embedded = self.embed(input)
+		output, (h_final, c_final) = self.lstm(embedded, self.hidden)
 		out = self.fully_connected(h_final[-1])
-		
+		scores = self.softmax(out)
+
 		return out
 
 	def init_hidden(self, batch):
@@ -402,98 +410,6 @@ class BetterLSTM(nn.Module):
 		c0 = torch.zeros(self.n_layers * self.num_dir, 
 			batch, self.hidden_size, device=device)
 		return h0, c0
-
-def train_sample(model, optimizer, loss_function, seq_tensor, label_tensor):
-	hidden = model.init_hidden(batch=1)
-	optimizer.zero_grad()
-	for i in range(seq_tensor.size()[0]):
-		output, hidden = model(seq_tensor[i], hidden)
-	loss = loss_function(output, label_tensor)
-	loss.backward()
-	nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
-	optimizer.step()
-
-	return output, loss.item()
-
-def batch_train(padded_xs, y_batch, model, opt, loss_function):
-	hidden = model.init_hidden(BATCH)
-	opt.zero_grad()
-	out, hidden = model(padded_xs, hidden)
-	#print("out = ", out)
-	#print("y_batch = ", y_batch)
-	loss = loss_function(out, y_batch)
-	loss.backward()
-	#nn.utils.clip_grad_norm_(model.parameters(), max_norm=2)
-	#print("loss = ", loss.item())
-	return out, loss.item()	
-
-def predict(model, sequence):
-	with torch.no_grad():
-		hidden = model.init_hidden(batch=1)
-		for i in range(sequence.size()[0]):
-			output, hidden = model(sequence[i], hidden)
-		topind = output.argmax(dim=-1)
-	return topind.item()
-
-def get_accuracy(model, samples, labels):
-	num_samples = len(samples)
-	assert num_samples == len(labels)
-	correct = 0
-	for x, y in zip(samples, labels):
-		y_pred = predict(model, x)
-		if y_pred == y.item():
-			correct += 1
-	accuracy = correct / num_samples
-	return accuracy * 100
-
-def evaluate(model, samples, labels):
-	num_samples = len(samples)
-	assert num_samples == len(labels)
-	correct = 0
-	with torch.no_grad():
-		for x, y in zip(samples, labels):
-			x = x.unsqueeze(1)
-			hidden = model.init_hidden(batch=1)
-			out, _ = model(x, hidden)
-			y_pred = out.argmax(dim=-1).item()
-			if y_pred == y.item(): correct += 1
-	return (correct / num_samples) * 100
-
-def lstm_evaluate(model, samples, labels):
-	num_samples = len(samples)
-	assert num_samples == len(labels)
-	correct = 0
-	true_ys = []
-	scores = []
-	predictions = []
-	true_neg = false_neg = false_pos = true_pos = 0
-	num_neg = num_pos = 0
-
-	with torch.no_grad():
-		for x, y in zip(samples, labels):
-			x = x.unsqueeze(1)
-			h0, c0 = model.init_hidden(batch=1)
-			out = model(x, h0, c0)
-			scores.append(torch.max(out).item())
-			y_pred = out.argmax(dim=-1).item()
-			predictions.append(y_pred)
-			y_true = y.item()
-			true_ys.append(y_true)
-			if y_pred == y_true: correct += 1
-
-	accuracy = (correct / num_samples) * 100
-	confusion = metrics.confusion_matrix(true_ys, predictions)
-
-	'''metrics.roc_curve returns: 
-	* fpr = array of increasing false pos rates
-	* tpr = array of increasing true pos rates
-	* thresholds = array of decreasing thresholds on the decision function
-		used to compute the fpr and tpr
-	'''
-	increasing_fprs, increasing_tprs, thresholds = metrics.roc_curve(true_ys, scores)
-	auc = metrics.roc_auc_score(true_ys, scores)
-	
-	return accuracy, increasing_fprs, increasing_tprs
 
 def main():
 	parameters = {}
