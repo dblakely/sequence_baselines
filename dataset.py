@@ -5,16 +5,37 @@
 import numpy as np
 import torch
 import random
+import string
+
+class Vocabulary(object):
+	def __init__(self):
+		self.token2idx = {}
+		self.idx2token = {}
+		self.size = len(self.token2idx)
+		self.pretrained = False
+
+	def add(self, token):
+		"""Params:
+		token: a letter (for char-level model) or word (for word-level model)
+		for which to create a mapping to an integer (the idx).
+
+		Return: the index of the word. If it's already present, return its
+		index. Otherwise, add it before returning the index.
+		"""
+		if token not in self.token2idx:
+			self.token2idx[token] = self.size
+			self.token2idx[self.size] = token
+			self.size += 1
+		return self.token2idx.get(token)
+
+	def __len__(self):
+		return self.size
 
 class Dataset(object):
-	
-	def __init__(self, dictionary_file, train_file, test_file, use_cuda=False):
+	def __init__(self, train_file, test_file, dictionary_file=None, use_cuda=False, word_model=False):
 		self.device = torch.device('cuda' if use_cuda else 'cpu')
-		self.dictionary = self.get_dict(dictionary_file)
-		self.alphabet_size = len(self.dictionary)
-		assert self.alphabet_size > 0
-		#self.xtrain, self.ytrain = self.prepare_data(train_file)
-		#self.xtest, self.ytest = self.prepare_data(test_file)
+		self.word_model = word_model
+		self.vocab = Vocabulary()
 		self.xtrain, self.ytrain = self.prepare_data_for_embedding(train_file)
 		self.xtest, self.ytest = self.prepare_data_for_embedding(test_file)
 		self.n_train = len(self.xtrain)
@@ -32,74 +53,45 @@ class Dataset(object):
 				num += 1
 		return dictionary
 
-	def char_to_index(self, char):
-		return self.dictionary[char]
-
-	# Create a one-hot encoding of a single characeter
-	def char_to_tensor(self, char):
-		tensor = torch.zeros(1, self.alphabet_size)
-		tensor[0][self.char_to_index(char)] = 1
-		return tensor
-
-	def seq_to_tensor(self, seq):
-		if type(seq) is str: seq = list(seq)
-		'''
-		tensor = torch.zeros(len(seq), 1, self.alphabet_size, device=self.device)
-		for i, char in enumerate(seq):
-			tensor[i][0][self.char_to_index(char)] = 1
-		'''
-		tensor = torch.zeros(len(seq), self.alphabet_size, device=self.device)
-		for i, char in enumerate(seq):
-			tensor[i][self.char_to_index(char)] = 1
-		return tensor
-
-	# obtain a list of one-hot tensors and a list of their labels
-	def prepare_data(self, datafile):
-		one_hot_seqs = []
-		labels = []
-		with open(datafile, 'r', encoding='utf-8') as f:
-			for line in f:
-				line = line.strip().lower().replace(' ', '')
-				length = len(line)
-				if line[0] == '>':
-					assert length == 2
-					label = int(line[1])
-					label_tensor = torch.tensor([label], dtype=torch.long, device=self.device)
-					labels.append(label_tensor)
-				else:
-					one_hot_seq = self.seq_to_tensor(line)
-					one_hot_seqs.append(one_hot_seq)
-		assert len(one_hot_seqs) == len(labels)
-		return one_hot_seqs, labels
-
-	# represent sequences as tensor of character indexes
-	# instead of list of one-hot encoded vectors
-	# I.e., what to use if using an embedding layer in the RNN
 	def prepare_data_for_embedding(self, datafile):
+		"""Represent sequences as tensors of char indexes (no one-hot)
+		Intended to be used in conjunction with torch.nn.Embedding
+		"""
 		numerical_seqs = []
 		labels = []
+		nlp_exclude = set(string.punctuation)
 		with open(datafile, 'r', encoding='utf-8') as f:
+			label_line = True # first line is assumed to be a label line
 			for line in f:
-				line = line.strip().lower().replace(' ', '')
-				length = len(line)
-				if line[0] == '>':
-					assert length == 2
-					label = int(line[1])
+				line = line.strip().lower()
+				if label_line:
+					split = line.split('>')
+					assert len(split) == 2
+					label = int(split[1])
 					label_tensor = torch.tensor([label], dtype=torch.long, device=self.device)
 					labels.append(label_tensor)
+					label_line = False
 				else:
-					seq = list(line)
-					seq = [self.char_to_index(char) for char in seq]
+					if self.word_model:
+						line = ''.join(c for c in line if c not in nlp_exclude)
+						seq = line.split()
+					else:
+						seq = list(line) # character-level model
+					seq = [self.vocab.add(token) for token in seq]
 					seq = torch.tensor(seq, dtype=torch.long, device=self.device)
 					numerical_seqs.append(seq)
+					label_line = True
 		assert len(numerical_seqs) == len(labels)
+
 		return numerical_seqs, labels
 
-	def get_batch(self, batch, training_data=True):
+	def get_batch(self, batch_size, training_data=True):
+		"""Retrieve a random batch of the given batch_size
+		"""
 		xbatch = []
 		ybatch = []
 		max_idx = self.n_train - 1 if training_data else self.n_test - 1
-		for _ in range(batch):
+		for _ in range(batch_size):
 			rand = random.randint(0, max_idx)
 			xbatch.append(self.xtrain[rand] if training_data else self.xtest[rand])
 			ybatch.append(self.ytrain[rand] if training_data else self.ytest[rand])

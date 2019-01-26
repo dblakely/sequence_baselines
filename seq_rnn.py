@@ -34,9 +34,7 @@ def get_args():
 	parser = argparse.ArgumentParser(description='Bio-Sequence RNN Baselines')
 	parser.add_argument('-b', '--batch', type=int, default=64, metavar='N',
 		help='input batch size for training (default: 64)')
-	parser.add_argument('-e', '--epochs', type=int, default=10, metavar='N',
-		help='number of epochs to train (default: 10)')
-	parser.add_argument('-i', '--iters', type=int, default=1000, metavar='N',
+	parser.add_argument('-i', '--iters', type=int, required=True, metavar='N',
 		help='number of iterations to train (default: 1000)')
 	parser.add_argument('-lr', '--learning-rate', type=float, default=0.01, metavar='LR',
 		help='learning rate (default: 0.01)')
@@ -48,15 +46,15 @@ def get_args():
 		help='Whether to use a bidirectional RNN')
 	parser.add_argument('--momentum', type=float, default=0.5, metavar='M',
 		help='SGD momentum (default: 0.5)')
-	parser.add_argument('--hidden', type=int, default=128, metavar='N',
-		help='Number of hidden units (default: 128)')
+	parser.add_argument('--hidden', type=int, default=64, metavar='N',
+		help='Number of hidden units (default: 64)')
 	parser.add_argument('--no-cuda', action='store_true', default=False,
 		help='disables CUDA')
 	parser.add_argument('-li', '--log-interval', type=int, default=1000, metavar='N',
 		help='how many iterations to wait before logging training status')
 	parser.add_argument('--save-model', action='store_true', default=False,
 		help='For Saving the current Model')
-	parser.add_argument('--opt', choices=['adagrad', 'adam', 'sgd'], default='sgd',
+	parser.add_argument('-opt', '--opt', choices=['adagrad', 'adam', 'sgd'], default='sgd',
 		help='Which optimizers to use. Options are Adagrad, Adam, SGD')
 	parser.add_argument('--trn', type=str, required=True, help='Training file', metavar='1.1.train.fasta')
 	parser.add_argument('--tst', type=str, required=True, help='Test file', metavar='1.1.test.fasta')
@@ -65,8 +63,16 @@ def get_args():
 	parser.add_argument('-od', '--output-directory', type=str,
 		help="""Name of directory to create. Will save data inside the directory.
 				If not provided, logged data will not be saved.""")
-	parser.add_argument('-d', '--dict', required=True, type=str, metavar='dna.dictionary',
+	parser.add_argument('-d', '--dict', required=False, type=str, metavar='dna.dictionary',
 		help='Dictionary file containing all chars that can appear in sequences, 1 per line')
+	parser.add_argument('-pw', '--pos-weight', type=float, default=1,
+		help='Weighting factor to place on the positive class')
+	parser.add_argument('-nw', '--neg-weight', type=float, default=1,
+		help='Weighting factor to place on the negative class')
+	parser.add_argument('--glove', action='store_true', default=False,
+		help='Flag to use pre-trained GloVe embeddings (for NLP tasks)')
+	parser.add_argument('--word', action='store_true', default=False,
+		help='Flag to use word-level (for NLP) model instead of char-level model')
 	
 	return parser.parse_args()
 
@@ -77,7 +83,6 @@ use_cuda = not args.no_cuda and torch.cuda.is_available()
 $ CUDA_VISIBLE_DEVICES=0 python seq_rnn.py [args]
 '''
 device = torch.device('cuda' if use_cuda else 'cpu')
-dict_file = args.dict
 train_file = args.trn
 test_file = args.tst
 iters = args.iters
@@ -174,24 +179,22 @@ class History(object):
 		except:
 			print("Make sure the History add_roc_info() was called first!")
 
-	def save_data(self, file_prefix):
-		train_acc_file = file_prefix + ".train.acc"
-		test_acc_file = file_prefix + ".test.acc"
-		train_loss_file = file_prefix + ".train.loss"
-		auc_vs_iters_file = file_prefix + '.test.auc'
-		roc_file = file_prefix + '.roc'
-		with open(train_acc_file, 'w+') as f:
-			for i, acc in zip(self.acc_iters, self.train_acc):
-				f.write("{} {}\n".format(i, acc))
-		with open(test_acc_file, 'w+') as f:
-			for i, acc in zip(self.acc_iters, self.test_acc):
-				f.write("{} {}\n".format(i, acc))
+	def save_data(self, path):
+		train_acc_auc = os.path.join(path, "train_acc_auc.txt")
+		test_acc_auc = os.path.join(path, "test_acc_auc.txt")
+		train_loss_file = os.path.join(path, "train_loss.txt")
+		roc_file = os.path.join(path, 'roc.txt')
+		with open(train_acc_auc, 'w+') as f:
+			f.write("Iter Acc AUROC\n")
+			for i, auc, acc in zip(self.acc_iters, self.train_auc, self.train_acc):
+				f.write("{}\t{}\t{}\n".format(i, acc, auc))
+		with open(test_acc_auc, 'w+') as f:
+			f.write("Iter Acc AUROC\n")
+			for i, acc, auc in zip(self.acc_iters, self.test_auc, self.test_acc):
+				f.write("{} {} {}\n".format(i, auc, acc))
 		with open(train_loss_file, 'w+') as f:
 			for i, loss in zip(self.loss_iters, self.losses):
 				f.write("{} {}\n".format(i, loss))
-		with open(auc_vs_iters_file, 'w+') as f:
-			for i, auc in zip(self.auc_iters, self.test_auc):
-				f.write("{} {}\n".format(i, auc))
 		with open(roc_file, 'w+') as f:
 			f.write(' '.join(map(str, self.fpr)))
 			f.write('\n')
@@ -413,26 +416,40 @@ class BetterLSTM(nn.Module):
 
 def main():
 	parameters = {}
-	dataset = Dataset(dict_file, train_file, test_file, use_cuda)
+	dataset = Dataset(train_file, test_file, args.dict, use_cuda, args.word)
 	xtrain, ytrain = dataset.xtrain, dataset.ytrain
 	xtest, ytest = dataset.xtest, dataset.ytest
-	alphabet_size = dataset.alphabet_size
+	alphabet_size = len(dataset.vocab)
 	hidden_size = args.hidden
 	num_train, num_test = len(xtrain), len(xtest)
-	print('training size: %d' % num_train)
-	print('test size: %d' % num_test)
-	print('device = %s' % device)
+	iters = args.iters
+	log_interval = args.log_interval
+	epochs = iters / num_train
+
+	print('Training size: %d ' % num_train)
+	print('Test size: %d' % num_test)
+	print('Alphabet size: %d' % alphabet_size)
+	print('Num epochs: %s' % epochs)
+	print('Device = %s' % device)
+
 	num_classes = 2
 
+	parameters['iterations'] = iters
+	parameters['epochs'] = epochs
+	parameters['log interval'] = log_interval
 	parameters['algorithm'] = 'lstm'
 	parameters['train set'] = train_file
 	parameters['test set'] = test_file
-	parameters['dictionary file'] = dict_file
+	parameters['dictionary file'] = args.dict
 	parameters['cuda'] = use_cuda
 	parameters['bidir'] = bidir
 	parameters['layers'] = n_layers
 	parameters['embedding size'] = embed_size
 	parameters['learning rate'] = lr
+	parameters['hidden size'] = hidden_size
+	parameters['optimizer'] = args.opt
+	parameters['loss function'] = 'cross entropy'
+	parameters['class weights'] = '[{}, {}]'.format(args.neg_weight, args.pos_weight)
 
 	model = BetterLSTM(input_size=alphabet_size, embedding_size=embed_size,
 		hidden_size=hidden_size, output_size=num_classes,
@@ -445,27 +462,22 @@ def main():
 	else:
 		opt = optim.SGD(model.parameters(), lr=lr)
 
+	class_weights = torch.FloatTensor([args.neg_weight, args.pos_weight]).to(device)
+
 	loss_function = F.cross_entropy
-
-	parameters['optimizer'] = args.opt
-	parameters['loss function'] = 'cross entropy'
-
-	iters = args.iters
-	log_interval = args.log_interval
-
-	parameters['iterations'] = iters
 
 	hist = History()
 	interval_loss = 0
 
 	for i in trange(1, iters + 1):
 		opt.zero_grad()
+		# sample training set
 		rand = random.randint(0, num_train - 1)
 		x, y = xtrain[rand], ytrain[rand]
 		x = torch.unsqueeze(x, dim=1) # (seqlen, sigma) --> (seqlen, batch=1, sigma)
 		h0, c0 = model.init_hidden(batch=1)
 		y_pred = model(x, h0, c0)
-		loss = loss_function(y_pred, y)
+		loss = loss_function(y_pred, y, class_weights)
 		loss.backward()
 		opt.step()
 
@@ -485,7 +497,7 @@ def main():
 				test_eval.increasing_tprs)
 			summary = ("Iter {}\ntrain acc = {}\ntest acc = {}\n"
 				"TPR/sensitvity/recall = {}\nTNR/specificity = {}\n"
-				"train loss = {}\nAUC-ROC = {}".format(i, train_eval.accuracy, 
+				"train loss = {}\nAUROC = {}".format(i, train_eval.accuracy, 
 					test_eval.accuracy, test_eval.tpr, test_eval.tnr,
 					avg_loss, test_eval.auc))
 			print(summary)
@@ -497,7 +509,7 @@ def main():
 
 	summary = ("Final Eval:\ntrain acc = {}\ntest acc = {}\n"
 		"TPR/sensitvity/recall = {}\nTNR/specificity = {}"
-		"\nAUC-ROC = {}".format(train_eval.accuracy, 
+		"\nAUROC = {}".format(train_eval.accuracy, 
 		test_eval.accuracy, test_eval.tpr, test_eval.tnr, test_eval.auc))
 	print(summary)
 
@@ -509,6 +521,7 @@ def main():
 	parameters['auc train'] = final_train_eval.auc
 	parameters['TPR/sensitvity/recall'] = final_test_eval.tpr
 	parameters['TNR/specificity'] = final_test_eval.tnr
+	parameters['class weighting'] = args.weights
 
 	# if output_directory specified, write data for future viewing
 	# otherwise, it'll be discarded
@@ -517,9 +530,7 @@ def main():
 		if os.path.exists(path):
 			shutil.rmtree(path)
 		os.makedirs(path)
-		file_prefix = "model"
-		file_prefix = os.path.join(path, file_prefix)
-		hist.save_data(file_prefix)
+		hist.save_data(path)
 		summary_file = os.path.join(path, 'about.txt')
 		
 		with open(summary_file, 'w+') as f:
@@ -535,6 +546,8 @@ def main():
 		hist.plot_auc(show=False, path=path)
 		hist.plot_roc(show=False, path=path)
 		final_test_eval.plot_confusion(show=False, path=path)
+
+		print("Saved results to " + path)
 
 	if args.show_graphs:
 		hist.plot_acc(show=True)
