@@ -17,7 +17,7 @@ from matplotlib import pyplot as plt
 import matplotlib.ticker as ticker
 import random
 import argparse
-from dataset import Dataset
+from dataset import Dataset, Vocabulary
 from tqdm import tqdm, trange
 from sklearn import metrics
 import datetime
@@ -61,16 +61,16 @@ def get_args():
 	parser.add_argument('--show-graphs', action='store_true', default=False,
 		help='Will show plots of the training and test accuracy and the training loss over time')
 	parser.add_argument('-od', '--output-directory', type=str,
-		help="""Name of directory to create. Will save data inside the directory.
-				If not provided, logged data will not be saved.""")
+		help="Name of directory to create. Will save data inside the directory."
+			"If not provided, logged data will not be saved.")
 	parser.add_argument('-d', '--dict', required=False, type=str, metavar='dna.dictionary',
 		help='Dictionary file containing all chars that can appear in sequences, 1 per line')
 	parser.add_argument('-pw', '--pos-weight', type=float, default=1,
 		help='Weighting factor to place on the positive class')
 	parser.add_argument('-nw', '--neg-weight', type=float, default=1,
 		help='Weighting factor to place on the negative class')
-	parser.add_argument('--glove', action='store_true', default=False,
-		help='Flag to use pre-trained GloVe embeddings (for NLP tasks)')
+	parser.add_argument('--glove', type=int, choices=[50, 100, 200, 300], required=False,
+		help='Size of pretrained Glove embeddings. Overrides the --embed-size argument')
 	parser.add_argument('--word', action='store_true', default=False,
 		help='Flag to use word-level (for NLP) model instead of char-level model')
 	
@@ -90,7 +90,6 @@ log_interval = args.log_interval
 n_layers = args.layers
 bidir = args.bidir
 BATCH = args.batch
-embed_size = args.embed_size
 lr = args.learning_rate
 PAD_VAL = -1
 
@@ -375,8 +374,11 @@ class SeqLSTM(nn.Module):
 
 class BetterLSTM(nn.Module):
 	# input_size = alphabet_size
-	def __init__(self, input_size, embedding_size, hidden_size, output_size, n_layers=1, bidir=False):
+	def __init__(self, input_size, embedding_size, hidden_size, output_size, 
+			n_layers=1, bidir=False, embedding=None):
+
 		super(BetterLSTM, self).__init__()
+
 		self.input_size = input_size
 		self.embedding_size = embedding_size
 		self.hidden_size = hidden_size
@@ -385,7 +387,11 @@ class BetterLSTM(nn.Module):
 		self.num_dir = 2 if bidir else 1
 		self.hidden = self.init_hidden(batch=1)
 
-		self.embed = nn.Embedding(num_embeddings=input_size, embedding_dim=embedding_size)
+		# whether to use pre-trained embeddings
+		if embedding:
+			self.embedding = embedding
+		else:
+			self.embedding = nn.Embedding(num_embeddings=input_size, embedding_dim=embedding_size)
 
 		self.lstm = nn.LSTM(input_size=embedding_size, 
 			hidden_size=hidden_size, num_layers=n_layers, bidirectional=bidir)
@@ -400,7 +406,7 @@ class BetterLSTM(nn.Module):
 		scores = self.softmax(out)
 		return scores
 		'''
-		embedded = self.embed(input)
+		embedded = self.embedding(input)
 		output, (h_final, c_final) = self.lstm(embedded, self.hidden)
 		out = self.fully_connected(h_final[-1])
 		scores = self.softmax(out)
@@ -416,7 +422,16 @@ class BetterLSTM(nn.Module):
 
 def main():
 	parameters = {}
-	dataset = Dataset(train_file, test_file, args.dict, use_cuda, args.word)
+	embedding = vocab = None
+	if args.glove is not None:
+		vocab, embedding = Vocabulary.from_glove(args.glove)
+		embed_size = args.glove
+		word = True
+	else:
+		embed_size = args.embed_size
+		word = args.word
+
+	dataset = Dataset(train_file, test_file, args.dict, use_cuda, word, vocab)
 	xtrain, ytrain = dataset.xtrain, dataset.ytrain
 	xtest, ytest = dataset.xtest, dataset.ytest
 	alphabet_size = len(dataset.vocab)
@@ -453,7 +468,7 @@ def main():
 
 	model = BetterLSTM(input_size=alphabet_size, embedding_size=embed_size,
 		hidden_size=hidden_size, output_size=num_classes,
-		n_layers=n_layers, bidir=bidir).to(device)
+		n_layers=n_layers, bidir=bidir, embedding=embedding).to(device)
 
 	if args.opt == 'adagrad':
 		opt = optim.Adagrad(model.parameters(), lr=lr)
@@ -521,7 +536,6 @@ def main():
 	parameters['auc train'] = final_train_eval.auc
 	parameters['TPR/sensitvity/recall'] = final_test_eval.tpr
 	parameters['TNR/specificity'] = final_test_eval.tnr
-	parameters['class weighting'] = args.weights
 
 	# if output_directory specified, write data for future viewing
 	# otherwise, it'll be discarded

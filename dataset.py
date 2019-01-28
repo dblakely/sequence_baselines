@@ -4,8 +4,19 @@
 
 import numpy as np
 import torch
+import torch.nn as nn
 import random
 import string
+from torchnlp.word_to_vector import GloVe
+
+CACHE = '.word_vectors_cache'
+
+def glove_embedding(size):
+	glove = GloVe('6B', size, cache=CACHE)
+	stoi = {tok: i for i, tok in enumerate(glove.itos)}
+	rows, cols = glove.vectors.shape
+	embedding = nn.Embedding(rows, cols, _weight=glove.vectors)
+	return embedding, stoi, glove.itos
 
 class Vocabulary(object):
 	def __init__(self):
@@ -13,6 +24,16 @@ class Vocabulary(object):
 		self.idx2token = {}
 		self.size = len(self.token2idx)
 		self.pretrained = False
+
+	@classmethod
+	def from_glove(cls, size):
+		self = cls()
+		embedding, stoi, itos = glove_embedding(size)
+		self.word2idx = stoi
+		self.idx2word = dict(enumerate(itos))
+		self.vocab_size = len(self.word2idx)
+		self.pretrained = True
+		return self, embedding
 
 	def add(self, token):
 		"""Params:
@@ -32,10 +53,18 @@ class Vocabulary(object):
 		return self.size
 
 class Dataset(object):
-	def __init__(self, train_file, test_file, dictionary_file=None, use_cuda=False, word_model=False):
+	def __init__(self, train_file, test_file, dictionary_file=None, 
+		use_cuda=False, word_model=False, vocab=None):
+		
 		self.device = torch.device('cuda' if use_cuda else 'cpu')
 		self.word_model = word_model
-		self.vocab = Vocabulary()
+
+		# use pre-trained glove embeddings
+		if vocab:
+			self.vocab = vocab
+		else:
+			self.vocab = Vocabulary()
+
 		self.xtrain, self.ytrain = self.prepare_data_for_embedding(train_file)
 		self.xtest, self.ytest = self.prepare_data_for_embedding(test_file)
 		self.n_train = len(self.xtrain)
@@ -68,6 +97,7 @@ class Dataset(object):
 					split = line.split('>')
 					assert len(split) == 2
 					label = int(split[1])
+					assert label == 0 or label == 1
 					label_tensor = torch.tensor([label], dtype=torch.long, device=self.device)
 					labels.append(label_tensor)
 					label_line = False
