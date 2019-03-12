@@ -524,8 +524,8 @@ def main():
 
 	summary = ("Final Eval:\ntrain acc = {}\ntest acc = {}\n"
 		"TPR/sensitvity/recall = {}\nTNR/specificity = {}"
-		"\nAUROC = {}".format(train_eval.accuracy, 
-		test_eval.accuracy, test_eval.tpr, test_eval.tnr, test_eval.auc))
+		"\nAUROC = {}".format(final_train_eval.accuracy, 
+		final_test_eval.accuracy, final_test_eval.tpr, final_test_eval.tnr, final_test_eval.auc))
 	print(summary)
 
 	final_test_eval.show_confusion()
