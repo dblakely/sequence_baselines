@@ -7,9 +7,9 @@ class Vocabulary(object):
 	vocabulary.
 	"""
 	def __init__(self):
-		self.token2idx = {}
-		self.idx2token = {}
-		self.size = len(self.token2idx)
+		self._token2idx = {}
+		self._idx2token = {}
+		self._size = 0
 
 	def add(self, token):
 		"""
@@ -21,11 +21,16 @@ class Vocabulary(object):
 			the index of the word. If it's already present, return its
 			index. Otherwise, add it before returning the index.
 		"""
-		if token not in self.token2idx:
-			self.token2idx[token] = self.size
-			self.token2idx[self.size] = token
-			self.size += 1
-		return self.token2idx.get(token)
+		if token not in self._token2idx:
+			self._token2idx[token] = self._size
+			self._token2idx[self._size] = token
+			self._size += 1
+		return self._token2idx.get(token)
+
+	def size(self):
+		"""Return the number tokens in the vocabulary.
+		"""
+		return self._size
 
 
 class FastaDataset(data.Dataset):

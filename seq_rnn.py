@@ -18,17 +18,18 @@ import matplotlib.ticker as ticker
 import random
 import argparse
 from dataset import Dataset, Vocabulary
+#from utils import FastaDataset, Vocabulary
 from tqdm import tqdm, trange
 from sklearn import metrics
 import datetime
 import seaborn as sn
-import pandas as pd
 
 ### Torch Imports
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from torch.utils import data
 
 def get_args():
 	parser = argparse.ArgumentParser(description='Bio-Sequence RNN Baselines')
@@ -82,6 +83,7 @@ use_cuda = not args.no_cuda and torch.cuda.is_available()
 '''Change visible devices with:
 $ CUDA_VISIBLE_DEVICES=0 python seq_rnn.py [args]
 '''
+
 device = torch.device('cuda' if use_cuda else 'cpu')
 train_file = args.trn
 test_file = args.tst
@@ -387,6 +389,9 @@ class BetterLSTM(nn.Module):
 		self.num_dir = 2 if bidir else 1
 		self.hidden = self.init_hidden(batch=1)
 
+		print("input_size = ", input_size)
+		print("embedding_size = ", embedding_size)
+
 		# whether to use pre-trained embeddings
 		if embedding:
 			self.embedding = embedding
@@ -419,6 +424,37 @@ class BetterLSTM(nn.Module):
 		c0 = torch.zeros(self.n_layers * self.num_dir, 
 			batch, self.hidden_size, device=device)
 		return h0, c0
+
+'''
+def main():
+	trainset = FastaDataset('./data/1.1.train.fasta')
+	train_loader = data.DataLoader(trainset, batch_size=1, shuffle=True)
+	alphabet = trainset.get_vocab()
+	testset = FastaDataset('./data/1.1.test.fasta', alphabet)
+	test_loader = data.DataLoader(testset, batch_size=1, shuffle=True)
+	model = BetterLSTM(input_size=alphabet.size(), embedding_size=32,
+			hidden_size=64, output_size=2,
+			n_layers=2, bidir=True, embedding=None).to(device)
+	loss_function = F.cross_entropy
+
+	opt = optim.Adam(model.parameters(), lr=0.001)
+	for x, y in train_loader:
+		opt.zero_grad()
+		x, y = x.to(device), y.to(device)
+		x = torch.unsqueeze(x, dim=1) # (seqlen, sigma) --> (seqlen, batch=1, sigma)
+		print("x.shape = ", x.shape)
+		print("x = ", x)
+		h0, c0 = model.init_hidden(batch=1)
+		print("h0.shape = ", h0.shape)
+		print("c0.shape = ", c0.shape)
+		y_pred = model(x, h0, c0)
+		loss = loss_function(y_pred, y, class_weights)
+		loss.backward()
+		opt.step()
+
+if __name__ == '__main__':
+	main()
+'''
 
 def main():
 	parameters = {}
