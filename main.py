@@ -2,9 +2,10 @@
 
 import numpy as np
 from skorch import NeuralNetClassifier
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, ParameterGrid
 from sklearn import metrics
 from tqdm import tqdm, trange
+import argparse
 
 import torch
 import torch.nn as nn
@@ -15,11 +16,30 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from utils import Vocabulary, FastaDataset, collate
 
-#use_cuda = not args.no_cuda and torch.cuda.is_available()
-use_cuda = True
+def get_args():
+	parser = argparse.ArgumentParser(description='Bio-Sequence RNN Baselines')
+	parser.add_argument('-b', '--batch', type=int, default=64, metavar='N',
+		help='input batch size for training (default: 64)')
+	parser.add_argument('--trn', type=str, required=True, help='Training file', metavar='1.1.train.fasta')
+	parser.add_argument('--tst', type=str, required=True, help='Test file', metavar='1.1.test.fasta')
+	parser.add_argument('--file', type=str, required=True, help='File to gris search results to')
+	parser.add_argument('--no-cuda', action='store_true', default=False,
+		help='disables CUDA')
+
+	return parser.parse_args()
+
+args = get_args()
+use_cuda = not args.no_cuda and torch.cuda.is_available()
 device = torch.device('cuda' if use_cuda else 'cpu')
-bsz = 32
-epochs = 10
+bsz = args.batch
+train_file = args.trn
+test_file = args.tst
+output_file = args.file
+highest_auc = 0
+
+with open(output_file, 'w+') as f:
+	f.write("trn: {} tst: {}, batch: {}, out: {}".format(train_file,
+		test_file, bsz, output_file))
 
 class SeqLSTM(nn.Module):
 	# input_size = alphabet_size
@@ -106,64 +126,65 @@ def test_epoch(model, test_loader):
 	tnr = 100 * confusion[0][0] / (confusion[0][0] + confusion[0][1])
 	# AUROC
 	auc = metrics.roc_auc_score(true_ys, scores)
-	print("acc = {}, tpr/sensitvity = {},"
-		"tnr/specificity = {}, AUROC = {}".format(accuracy, tpr, tnr, auc))
-	return accuracy
+	
+	return accuracy, tpr, tnr, auc
+
+def run(params, train_loader, test_loader):
+	global highest_auc
+	print(params)
+	model = SeqLSTM(input_size=params['input_size'],
+		embedding_size=params['embedding_size'],
+		hidden_size=params['hidden_size'],
+		output_size=params['output_size'],
+		n_layers=params['n_layers'],
+		bidir=params['bidir'],
+		embedding=None).to(device)
+	opt = optim.Adam(model.parameters(), lr=params['lr'])
+
+	for i in trange(1, params['epochs'] + 1):
+		train_epoch(model, opt, train_loader)
+
+	acc, tpr, tnr, auc = test_epoch(model, test_loader)
+
+	result = "acc = {}, tpr/sensitvity = {}, tnr/specificity = {}, AUROC = {}".format(acc, tpr, tnr, auc)
+
+	print(result)
+
+	with open(output_file, 'a+') as f:
+		f.write(str(params) + '\n' + result + '\n')
+		if (auc > highest_auc):
+			f.write("highest auc = {}\n".format(auc))
+			highest_auc = auc
 
 def main():
-	trainset = FastaDataset('./data/1.1.train.fasta')
+	trainset = FastaDataset(train_file)
 	train_loader = data.DataLoader(trainset, 
 		batch_size=bsz, 
 		shuffle=True,
 		collate_fn=collate)
 	alphabet = trainset.get_vocab()
-	testset = FastaDataset('./data/1.1.test.fasta', alphabet)
+	testset = FastaDataset(test_file, alphabet)
 	test_loader = data.DataLoader(testset, 
 		batch_size=1, 
 		shuffle=True,
 		collate_fn=collate)
-	model = SeqLSTM(input_size=alphabet.size(), 
-				embedding_size=32,
-				hidden_size=64, 
-				output_size=2,
-				n_layers=2, 
-				bidir=True, 
-				embedding=None).to(device)
 
-	opt = optim.Adam(model.parameters(), lr=0.001)
-
-	#net = NeuralNetClassifier(BetterLSTM)
-
-	# for CV
-	params = {
-		'lr': [0.01, 0.02],
-		'max_epochs': [10, 20],
-		'module__input_size': [alphabet.size()], 
-		'module__embedding_size': [32], 
-		'module__hidden_size': [16, 32], 
-		'module__output_size': [2],
-		'module__n_layers': [1], 
-		'module__bidir': [False], 
-		'module__embedding': [None]
+	param_space = {
+		'lr': [0.01, 0.001],
+		'epochs': list(range(1, 10)),
+		'input_size': [alphabet.size()], 
+		'embedding_size': [16, 32, 64, 128, 256], 
+		'hidden_size': [16, 32, 64, 128, 256], 
+		'output_size': [2],
+		'n_layers': [1, 2, 3, 4], 
+		'bidir': [False, True],
+		'optimizer': ['Adam']
 	}
-	'''
-	grid_search = GridSearchCV(net, params, cv=3, scoring='accuracy')
-	X, Y = [], []
-	for x, y in train_loader:
-		x = x.view(-1, 1)
-		y = torch.squeeze(y, dim=0)
-		X.append(x)
-		Y.append(y)
-	grid_search.fit(X, Y)
-	print(grid_search.best_score_, grid_search.best_params_)
-	'''
 
-	for i in trange(1, epochs + 1):
-		train_epoch(model, opt, train_loader)
-		test_epoch(model, test_loader)
+	param_list = list(ParameterGrid(param_space))
 
-	accuracy = test_epoch(model, test_loader)
-	print("accuracy = {}".format(accuracy))
+	for params in param_list:
+		run(params, train_loader, test_loader)
 
 if __name__ == '__main__':
 	main()
