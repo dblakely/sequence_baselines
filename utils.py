@@ -2,6 +2,8 @@ import torch
 from torch.utils import data
 from torch.nn.utils.rnn import pad_sequence
 
+
+
 PAD_IDX = 0
 
 class Vocabulary(object):
@@ -115,8 +117,10 @@ class BatchSequenceSampler(data.Sampler):
 		pass
 
 def collate(batch):
+	batch = sorted(batch, key=lambda x: x[0].shape[0], reverse=True)
 	sequences = [item[0] for item in batch]
 	labels = [item[1] for item in batch]
+	lengths = [seq.shape[0] for seq in sequences]
 	x = pad_sequence(sequences, padding_value=0, batch_first=False)
 	y = torch.LongTensor(labels)
-	return [x, y]
+	return [x, y, lengths]
