@@ -106,16 +106,6 @@ class FastaDataset(data.Dataset):
 		return self._vocab
 
 
-class BatchSequenceSampler(data.Sampler):
-	def __init__(self, data_source):
-		pass
-
-	def __iter__(self):
-		pass
-
-	def __len__(self):
-		pass
-
 def collate(batch):
 	batch = sorted(batch, key=lambda x: x[0].shape[0], reverse=True)
 	sequences = [item[0] for item in batch]

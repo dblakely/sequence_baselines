@@ -3,6 +3,7 @@
 import numpy as np
 from skorch import NeuralNetClassifier
 from sklearn.model_selection import GridSearchCV
+from sklearn import metrics
 from tqdm import tqdm, trange
 
 import torch
@@ -18,7 +19,7 @@ from utils import Vocabulary, FastaDataset, collate
 use_cuda = True
 device = torch.device('cuda' if use_cuda else 'cpu')
 bsz = 32
-epochs = 4
+epochs = 10
 
 class SeqLSTM(nn.Module):
 	# input_size = alphabet_size
@@ -84,18 +85,29 @@ def test_epoch(model, test_loader):
 		preds = []
 		scores = []
 		num_samples = len(test_loader)
+
 		for x, y, lengths in test_loader:
 			x, y = x.to(device), y.to(device)
 			out = model(x, lengths)
-			max_index = out.max(dim=1)[1]
-			num_correct += (max_index == y).sum().item()
-			#pos_score = out[0][1].item()
-			#scores.append(pos_score)
-			#y_pred = out.argmax(dim=-1)
-			#preds.append(y_pred)
-			#true_ys.append(y)
-			#if y_pred == y: num_correct += 1
+			y_pred = out.max(dim=1)[1]
+			num_correct += (y_pred == y).sum().item()
+			pos_score = out[0][1].item()
+
+			true_ys += y.tolist()
+			scores.append(pos_score)
+			preds += y_pred.tolist()
+
 	accuracy = (num_correct / num_samples) * 100
+	confusion = metrics.confusion_matrix(true_ys, preds)
+	print(str(confusion) + '\n')
+	# true positive rate/sensitvity
+	tpr = 100 * confusion[1][1] / (confusion[1][0] + confusion[1][1])
+	# true negative rate/specificity
+	tnr = 100 * confusion[0][0] / (confusion[0][0] + confusion[0][1])
+	# AUROC
+	auc = metrics.roc_auc_score(true_ys, scores)
+	print("acc = {}, tpr/sensitvity = {},"
+		"tnr/specificity = {}, AUROC = {}".format(accuracy, tpr, tnr, auc))
 	return accuracy
 
 def main():
@@ -148,6 +160,7 @@ def main():
 
 	for i in trange(1, epochs + 1):
 		train_epoch(model, opt, train_loader)
+		test_epoch(model, test_loader)
 
 	accuracy = test_epoch(model, test_loader)
 	print("accuracy = {}".format(accuracy))
