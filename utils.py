@@ -1,5 +1,8 @@
 import torch
 from torch.utils import data
+from torch.nn.utils.rnn import pad_sequence
+
+PAD_IDX = 0
 
 class Vocabulary(object):
 	"""A class for storing the vocabulary of a 
@@ -9,7 +12,9 @@ class Vocabulary(object):
 	def __init__(self):
 		self._token2idx = {}
 		self._idx2token = {}
-		self._size = 0
+		self._token2idx[0] = 0
+		self._idx2token[0] = 0
+		self._size = 1
 
 	def add(self, token):
 		"""
@@ -52,6 +57,7 @@ class FastaDataset(data.Dataset):
 		self.transform = transform
 		self._vocab = Vocabulary() if vocab is None else vocab
 		self.sequences = []
+		self.padded_sequences = []
 		self.labels = []
 		self._process()
 
@@ -60,6 +66,7 @@ class FastaDataset(data.Dataset):
 
 	def __getitem__(self, idx):
 		sequence = self.sequences[idx]
+		#sequence = self.padded_sequences[idx]
 		sequence = sequence if self.transform is None else self.transform(sequence)
 		label = self.labels[idx]
 		return sequence, label
@@ -90,8 +97,26 @@ class FastaDataset(data.Dataset):
 					seq = torch.tensor(seq, dtype=torch.long)
 					self.sequences.append(seq)
 					label_line = True
+		#self.padded_sequences = pad_sequence(self.sequences, padding_value=0, batch_first=True)
+		#print("self.padded_sequences.shape = ", self.padded_sequences.shape)
 		assert len(self.sequences) == len(self.labels)
-
 	def get_vocab(self):
 		return self._vocab
 
+
+class BatchSequenceSampler(data.Sampler):
+	def __init__(self, data_source):
+		pass
+
+	def __iter__(self):
+		pass
+
+	def __len__(self):
+		pass
+
+def collate(batch):
+	sequences = [item[0] for item in batch]
+	labels = [item[1] for item in batch]
+	x = pad_sequence(sequences, padding_value=0, batch_first=False)
+	y = torch.LongTensor(labels)
+	return [x, y]
