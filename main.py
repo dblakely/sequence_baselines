@@ -78,7 +78,7 @@ class SeqLSTM(nn.Module):
 		lstm_out, (h_final, c_final) = self.lstm(embedded, hidden)
 		output = pad_packed_sequence(lstm_out)
 		out = self.fully_connected(h_final[-1])
-		scores = self.softmax(out)
+		#scores = self.softmax(out)
 
 		return out
 
@@ -98,7 +98,7 @@ def train_epoch(model, opt, train_loader):
 		loss.backward()
 		opt.step()
 
-def test_epoch(model, test_loader):
+def evaluate(model, test_loader):
 	with torch.no_grad():
 		num_correct = 0
 		true_ys = []
@@ -125,7 +125,13 @@ def test_epoch(model, test_loader):
 	# true negative rate/specificity
 	tnr = 100 * confusion[0][0] / (confusion[0][0] + confusion[0][1])
 	# AUROC
-	auc = metrics.roc_auc_score(true_ys, scores)
+	try:
+		auc = metrics.roc_auc_score(true_ys, scores)
+	except ValueError as e:
+		with open(output_file, 'a+') as f:
+			f.write(str(e) + "\n")
+			f.write("true_ys = {}\n, scores = {}".format(true_ys, scores))
+		auc = 0
 	
 	return accuracy, tpr, tnr, auc
 
@@ -144,14 +150,14 @@ def run(params, train_loader, test_loader):
 	for i in trange(1, params['epochs'] + 1):
 		train_epoch(model, opt, train_loader)
 
-	acc, tpr, tnr, auc = test_epoch(model, test_loader)
+	acc, tpr, tnr, auc = evaluate(model, test_loader)
 
 	result = "acc = {}, tpr/sensitvity = {}, tnr/specificity = {}, AUROC = {}".format(acc, tpr, tnr, auc)
 
 	print(result)
 
 	with open(output_file, 'a+') as f:
-		f.write(str(params) + '\n' + result + '\n')
+		f.write("\n" + str(params) + '\n' + result + '\n')
 		if (auc > highest_auc):
 			f.write("highest auc = {}\n".format(auc))
 			highest_auc = auc
@@ -162,6 +168,7 @@ def main():
 		batch_size=bsz, 
 		shuffle=True,
 		collate_fn=collate)
+
 	alphabet = trainset.get_vocab()
 	testset = FastaDataset(test_file, alphabet)
 	test_loader = data.DataLoader(testset, 
@@ -170,14 +177,14 @@ def main():
 		collate_fn=collate)
 
 	param_space = {
-		'lr': [0.01, 0.001],
-		'epochs': list(range(1, 10)),
+		'lr': [0.0001],
+		'epochs': list(range(1, 11)),
 		'input_size': [alphabet.size()], 
 		'embedding_size': [16, 32, 64, 128, 256], 
 		'hidden_size': [16, 32, 64, 128, 256], 
 		'output_size': [2],
 		'n_layers': [1, 2, 3, 4], 
-		'bidir': [False, True],
+		'bidir': [True],
 		'optimizer': ['Adam']
 	}
 

@@ -1,10 +1,20 @@
+import random
+
 import torch
 from torch.utils import data
 from torch.nn.utils.rnn import pad_sequence
 
 
-
 PAD_IDX = 0
+
+def collate(batch):
+	batch = sorted(batch, key=lambda x: x[0].shape[0], reverse=True)
+	sequences = [item[0] for item in batch]
+	labels = [item[1] for item in batch]
+	lengths = [seq.shape[0] for seq in sequences]
+	x = pad_sequence(sequences, padding_value=0, batch_first=False)
+	y = torch.LongTensor(labels)
+	return [x, y, lengths]
 
 class Vocabulary(object):
 	"""A class for storing the vocabulary of a 
@@ -40,6 +50,27 @@ class Vocabulary(object):
 		return self._size
 
 
+class Fold(data.Dataset):
+	"""Dataset wrapper for a cross validation fold. Used to
+	make cross validation sampling with DataLoader easy.
+	Args:
+		
+	"""
+	def __init__(self, sequences, labels, transform=None):
+		self.sequences = sequences
+		self.labels = labels
+		self.transform = transform
+
+	def __len__(self):
+		return len(self.labels)
+
+	def __getitem__(self, idx):
+		sequence = self.sequences[idx]
+		sequence = sequence if self.transform is None else self.transform(sequence)
+		label = self.labels[idx]
+		return sequence, label
+
+
 class FastaDataset(data.Dataset):
 	"""Dataset class for creating FASTA-formatted
 	sequence datasets.
@@ -62,6 +93,7 @@ class FastaDataset(data.Dataset):
 		self.padded_sequences = []
 		self.labels = []
 		self._process()
+		self._folds = []
 
 	def __len__(self):
 		return len(self.labels)
@@ -102,15 +134,53 @@ class FastaDataset(data.Dataset):
 		#self.padded_sequences = pad_sequence(self.sequences, padding_value=0, batch_first=True)
 		#print("self.padded_sequences.shape = ", self.padded_sequences.shape)
 		assert len(self.sequences) == len(self.labels)
+	
 	def get_vocab(self):
 		return self._vocab
 
+	def split(self, k=7):
+		"""Shuffle dataset and split into k folds.
+		Args:
+			k (int): number of 
+		"""
 
-def collate(batch):
-	batch = sorted(batch, key=lambda x: x[0].shape[0], reverse=True)
-	sequences = [item[0] for item in batch]
-	labels = [item[1] for item in batch]
-	lengths = [seq.shape[0] for seq in sequences]
-	x = pad_sequence(sequences, padding_value=0, batch_first=False)
-	y = torch.LongTensor(labels)
-	return [x, y, lengths]
+		# unison shuffle sequences and labels
+		shuffle = list(zip(self.sequences, self.labels))
+		random.shuffle(shuffle)
+		self.sequences, self.labels = zip(*shuffle)
+
+		# create folds
+		total_size = len(self.sequences)
+		fold_size = total_size // k
+		for i in range(k):
+			start = i * fold_size
+			end = start + fold_size if i < k - 1 else total_size
+			fold_sequences = self.sequences[start:end]
+			fold_labels = self.labels[start:end]
+			self._folds.append(list(zip(fold_sequences, fold_labels)))
+
+	def get_fold(self, idx):
+		"""Return 2 dataloaders where the ith fold is a
+		validation set.
+		"""
+		num_folds = len(self._folds)
+		if (idx >= num_folds):
+			raise ValueError("idx must be in range 0-{}, inclusive. Received {}".format(num_folds - 1, idx))
+		train = []
+		for i in range(num_folds):
+			if i == idx:
+				vali = self._folds[i]
+			else:
+				train += self._folds[i]
+
+
+		train_sequences, train_labels = zip(*train)
+		vali_sequences, vali_labels = zip(*vali)
+
+		train_fold = Fold(train_sequences, train_labels)
+		vali_fold = Fold(vali_sequences, vali_labels)
+
+		print("train len = ", len(train_fold))
+		print("vali len = ", len(vali_fold))
+
+		return train_fold, vali_fold
