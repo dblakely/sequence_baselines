@@ -172,15 +172,10 @@ class FastaDataset(data.Dataset):
 				vali = self._folds[i]
 			else:
 				train += self._folds[i]
-
-
+				
 		train_sequences, train_labels = zip(*train)
 		vali_sequences, vali_labels = zip(*vali)
-
 		train_fold = Fold(train_sequences, train_labels)
 		vali_fold = Fold(vali_sequences, vali_labels)
-
-		print("train len = ", len(train_fold))
-		print("vali len = ", len(vali_fold))
 
 		return train_fold, vali_fold

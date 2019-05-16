@@ -36,6 +36,8 @@ train_file = args.trn
 test_file = args.tst
 output_file = args.file
 highest_auc = 0
+best_params = {}
+num_folds = 7
 
 with open(output_file, 'w+') as f:
 	f.write("trn: {} tst: {}, batch: {}, out: {}".format(train_file,
@@ -74,13 +76,12 @@ class SeqLSTM(nn.Module):
 		batch_size = x.shape[1]
 		hidden = self.init_hidden(batch=batch_size)
 		embedded = self.embedding(x)
-		embedded = pack_padded_sequence(embedded, lengths)
-		lstm_out, (h_final, c_final) = self.lstm(embedded, hidden)
-		output = pad_packed_sequence(lstm_out)
-		out = self.fully_connected(h_final[-1])
-		#scores = self.softmax(out)
+		packed_embedded = pack_padded_sequence(embedded, lengths)
+		lstm_out, (h_final, c_final) = self.lstm(packed_embedded, hidden)
+		lstm_out = pad_packed_sequence(lstm_out)
+		logits = self.fully_connected(h_final[-1])
 
-		return out
+		return logits
 
 	def init_hidden(self, batch):
 		h0 = torch.zeros(self.n_layers * self.num_dir, 
@@ -90,36 +91,44 @@ class SeqLSTM(nn.Module):
 		return h0, c0
 
 def train_epoch(model, opt, train_loader):
+	epoch_loss = 0
 	for x, y, lengths in train_loader:
 		opt.zero_grad()
 		x, y = x.to(device), y.to(device)
-		y_pred = model(x, lengths)
-		loss = F.cross_entropy(y_pred, y)
+		logits = model(x, lengths)
+		loss = F.cross_entropy(logits, y)
 		loss.backward()
 		opt.step()
+		epoch_loss += loss.item()
+	
+	return epoch_loss / len(train_loader)
 
 def evaluate(model, test_loader):
+	num_samples = len(test_loader)
 	with torch.no_grad():
+		epoch_loss = 0
 		num_correct = 0
 		true_ys = []
 		preds = []
 		scores = []
-		num_samples = len(test_loader)
-
 		for x, y, lengths in test_loader:
 			x, y = x.to(device), y.to(device)
-			out = model(x, lengths)
-			y_pred = out.max(dim=1)[1]
+			logits = model(x, lengths)
+			loss = F.cross_entropy(logits, y)
+			epoch_loss += loss.item()
+			y_pred = logits.max(dim=1)[1]
 			num_correct += (y_pred == y).sum().item()
-			pos_score = out[0][1].item()
-
+			probs = F.softmax(logits, dim=1)
+			pos_scores = probs[:,1].tolist()
+			scores += pos_scores
+			pos_score = probs[0][1].item()
 			true_ys += y.tolist()
-			scores.append(pos_score)
 			preds += y_pred.tolist()
 
+	epoch_loss /= num_samples
 	accuracy = (num_correct / num_samples) * 100
 	confusion = metrics.confusion_matrix(true_ys, preds)
-	print(str(confusion) + '\n')
+	#print(str(confusion) + '\n')
 	# true positive rate/sensitvity
 	tpr = 100 * confusion[1][1] / (confusion[1][0] + confusion[1][1])
 	# true negative rate/specificity
@@ -133,57 +142,114 @@ def evaluate(model, test_loader):
 			f.write("true_ys = {}\n, scores = {}".format(true_ys, scores))
 		auc = 0
 	
-	return accuracy, tpr, tnr, auc
+	return epoch_loss, accuracy, tpr, tnr, auc
 
-def run(params, train_loader, test_loader):
-	global highest_auc
+def run(params, trainset):
+	global highest_auc, best_params
 	print(params)
-	model = SeqLSTM(input_size=params['input_size'],
-		embedding_size=params['embedding_size'],
-		hidden_size=params['hidden_size'],
-		output_size=params['output_size'],
-		n_layers=params['n_layers'],
-		bidir=params['bidir'],
-		embedding=None).to(device)
-	opt = optim.Adam(model.parameters(), lr=params['lr'])
 
-	for i in trange(1, params['epochs'] + 1):
-		train_epoch(model, opt, train_loader)
+	trainset.split()
+	total_acc = 0
+	total_auc = 0
 
-	acc, tpr, tnr, auc = evaluate(model, test_loader)
+	for i in range(num_folds):
+		train, vali = trainset.get_fold(i)
+		train_loader = data.DataLoader(train, 
+			batch_size=bsz, 
+			shuffle=False,
+			collate_fn=collate)
+		vali_loader = data.DataLoader(vali,
+			batch_size=bsz,
+			shuffle=False,
+			collate_fn=collate)
+		model = SeqLSTM(input_size=params['input_size'],
+			embedding_size=params['embedding_size'],
+			hidden_size=params['hidden_size'],
+			output_size=params['output_size'],
+			n_layers=params['n_layers'],
+			bidir=params['bidir'],
+			embedding=None).to(device)
+		opt = optim.Adam(model.parameters(), lr=params['lr'])
 
-	result = "acc = {}, tpr/sensitvity = {}, tnr/specificity = {}, AUROC = {}".format(acc, tpr, tnr, auc)
+		for i in range(1, 21):
+			train_loss = train_epoch(model, opt, train_loader)
+			vali_loss, acc, tpr, tnr, auc = evaluate(model, vali_loader)
+			result = "train_loss = {}, vali_loss = {}, ".format(train_loss, vali_loss)
+			result += "acc = {}, tpr/sensitvity = {}, ".format(acc, tpr)
+			result += "tnr/specificity = {}, AUROC = {}".format(tnr, auc)
+			# early stopping criterion
+			if vali_loss > train_loss:
+				break
 
-	print(result)
+		vali_loss, acc, tpr, tnr, auc = evaluate(model, vali_loader)
+		result = "train_loss = {}, vali_loss = {}, ".format(train_loss, vali_loss)
+		result += "acc = {}, tpr/sensitvity = {}, ".format(acc, tpr)
+		result += "tnr/specificity = {}, AUROC = {}".format(tnr, auc)
+		total_acc += acc
+		total_auc += auc
+
+	acc = total_acc / num_folds
+	auc = total_auc / num_folds
+
+	if (auc > highest_auc):
+		highest_auc = auc
+		best_params = params
 
 	with open(output_file, 'a+') as f:
-		f.write("\n" + str(params) + '\n' + result + '\n')
-		if (auc > highest_auc):
-			f.write("highest auc = {}\n".format(auc))
-			highest_auc = auc
+		f.write("\n\n" + str(params) + '\n' + result + '\n')
+
+def run_best(trainset, testset):
+	trainset.split()
+	train, vali = trainset.get_fold(0)
+
+
+	train_loader = data.DataLoader(train, 
+		batch_size=bsz, 
+		shuffle=False,
+		collate_fn=collate)
+	vali_loader = data.DataLoader(vali,
+		batch_size=bsz,
+		shuffle=False,
+		collate_fn=collate)
+	test_loader = data.DataLoader(testset,
+		batch_size=bsz,
+		shuffle=True,
+		collate_fn=collate)
+	model = SeqLSTM(input_size=best_params['input_size'],
+		embedding_size=best_params['embedding_size'],
+		hidden_size=best_params['hidden_size'],
+		output_size=best_params['output_size'],
+		n_layers=best_params['n_layers'],
+		bidir=best_params['bidir'],
+		embedding=None).to(device)
+	opt = optim.Adam(model.parameters(), lr=best_params['lr'])
+
+	for i in range(1, 21):
+		train_loss = train_epoch(model, opt, train_loader)
+		vali_loss, acc, tpr, tnr, auc = evaluate(model, vali_loader)
+		if vali_loss > train_loss:
+			break
+
+	test_loss, test_acc, test_tpr, test_tnr, test_auc = evaluate(model, test_loader)
+	result = "loss = {}, acc = {}, ".format(test_loss, test_acc)
+	result += "tpr/sensitvity = {}, tnr/specificity = {}, ".format(test_tpr, test_tnr)
+	result += "AUROC = {}".format(test_auc)
+
+	with open(output_file, 'a+') as f:
+		f.write("\n\nFinal model: " + str(best_params) + '\n' + result + '\n')
 
 def main():
 	trainset = FastaDataset(train_file)
-	train_loader = data.DataLoader(trainset, 
-		batch_size=bsz, 
-		shuffle=True,
-		collate_fn=collate)
-
 	alphabet = trainset.get_vocab()
 	testset = FastaDataset(test_file, alphabet)
-	test_loader = data.DataLoader(testset, 
-		batch_size=1, 
-		shuffle=True,
-		collate_fn=collate)
 
 	param_space = {
 		'lr': [0.0001],
-		'epochs': list(range(1, 11)),
 		'input_size': [alphabet.size()], 
-		'embedding_size': [16, 32, 64, 128, 256], 
-		'hidden_size': [16, 32, 64, 128, 256], 
+		'embedding_size': [16, 32, 64, 128], 
+		'hidden_size': [16, 32, 64, 128],
 		'output_size': [2],
-		'n_layers': [1, 2, 3, 4], 
+		'n_layers': [1, 2, 3, 4],
 		'bidir': [True],
 		'optimizer': ['Adam']
 	}
@@ -191,7 +257,9 @@ def main():
 	param_list = list(ParameterGrid(param_space))
 
 	for params in param_list:
-		run(params, train_loader, test_loader)
+		run(params, trainset)
+
+	run_best(trainset, testset)
 
 if __name__ == '__main__':
 	main()
