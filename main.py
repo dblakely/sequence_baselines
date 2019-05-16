@@ -91,6 +91,7 @@ class SeqLSTM(nn.Module):
 		return h0, c0
 
 def train_epoch(model, opt, train_loader):
+	num_batches = len(train_loader)
 	epoch_loss = 0
 	for x, y, lengths in train_loader:
 		opt.zero_grad()
@@ -101,17 +102,19 @@ def train_epoch(model, opt, train_loader):
 		opt.step()
 		epoch_loss += loss.item()
 	
-	return epoch_loss / len(train_loader)
+	return epoch_loss / num_batches
 
 def evaluate(model, test_loader):
-	num_samples = len(test_loader)
+	num_batches = len(test_loader)
+	num_samples = 0
+	epoch_loss = 0
+	num_correct = 0
+	true_ys = []
+	preds = []
+	scores = []
 	with torch.no_grad():
-		epoch_loss = 0
-		num_correct = 0
-		true_ys = []
-		preds = []
-		scores = []
 		for x, y, lengths in test_loader:
+			num_samples += y.shape[0]
 			x, y = x.to(device), y.to(device)
 			logits = model(x, lengths)
 			loss = F.cross_entropy(logits, y)
@@ -125,7 +128,7 @@ def evaluate(model, test_loader):
 			true_ys += y.tolist()
 			preds += y_pred.tolist()
 
-	epoch_loss /= num_samples
+	epoch_loss /= num_batches
 	accuracy = (num_correct / num_samples) * 100
 	confusion = metrics.confusion_matrix(true_ys, preds)
 	#print(str(confusion) + '\n')
@@ -171,7 +174,7 @@ def run(params, trainset):
 			embedding=None).to(device)
 		opt = optim.Adam(model.parameters(), lr=params['lr'])
 
-		for i in range(1, 21):
+		for i in range(1, 2):
 			train_loss = train_epoch(model, opt, train_loader)
 			vali_loss, acc, tpr, tnr, auc = evaluate(model, vali_loader)
 			result = "train_loss = {}, vali_loss = {}, ".format(train_loss, vali_loss)
@@ -256,8 +259,12 @@ def main():
 
 	param_list = list(ParameterGrid(param_space))
 
+	count = 0
 	for params in param_list:
+		count += 1
 		run(params, trainset)
+		if (count % 5 == 0):
+			run_best(trainset, testset)
 
 	run_best(trainset, testset)
 
