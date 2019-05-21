@@ -31,6 +31,7 @@ def get_args():
 args = get_args()
 use_cuda = not args.no_cuda and torch.cuda.is_available()
 device = torch.device('cuda' if use_cuda else 'cpu')
+print("device = ", device)
 bsz = args.batch
 train_file = args.trn
 test_file = args.tst
@@ -174,12 +175,9 @@ def run(params, trainset):
 			embedding=None).to(device)
 		opt = optim.Adam(model.parameters(), lr=params['lr'])
 
-		for i in range(1, 2):
+		for i in range(1, 21):
 			train_loss = train_epoch(model, opt, train_loader)
 			vali_loss, acc, tpr, tnr, auc = evaluate(model, vali_loader)
-			result = "train_loss = {}, vali_loss = {}, ".format(train_loss, vali_loss)
-			result += "acc = {}, tpr/sensitvity = {}, ".format(acc, tpr)
-			result += "tnr/specificity = {}, AUROC = {}".format(tnr, auc)
 			# early stopping criterion
 			if vali_loss > train_loss:
 				break
