@@ -23,8 +23,8 @@ def get_args():
 	parser.add_argument('--trn', type=str, required=True, help='Training file', metavar='1.1.train.fasta')
 	parser.add_argument('--tst', type=str, required=True, help='Test file', metavar='1.1.test.fasta')
 	parser.add_argument('--file', type=str, required=True, help='File to gris search results to')
-	parser.add_argument('--no-cuda', action='store_true', default=False,
-		help='disables CUDA')
+	parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA')
+	parser.add_argument('--num-folds', type=int, default=7, help='Number of folds for CV')
 
 	return parser.parse_args()
 
@@ -38,7 +38,7 @@ test_file = args.tst
 output_file = args.file
 highest_auc = 0
 best_params = {}
-num_folds = 7
+num_folds = args.num_folds
 
 with open(output_file, 'w+') as f:
 	f.write("trn: {} tst: {}, batch: {}, out: {}".format(train_file,
@@ -173,7 +173,7 @@ def run(params, trainset):
 			n_layers=params['n_layers'],
 			bidir=params['bidir'],
 			embedding=None).to(device)
-		opt = optim.Adam(model.parameters(), lr=params['lr'])
+		opt = optim.Adam(model.parameters(), lr=params['lr'], weight_decay=0.0005)
 
 		for i in range(1, 21):
 			train_loss = train_epoch(model, opt, train_loader)
