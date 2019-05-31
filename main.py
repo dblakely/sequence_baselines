@@ -248,7 +248,7 @@ def main():
 		'lr': [0.0001],
 		'input_size': [alphabet.size()], 
 		'embedding_size': [32, 64, 128, 256], 
-		'hidden_size': [32, 64, 128, 256],
+		'hidden_size': [64, 128, 256],
 		'output_size': [2],
 		'n_layers': [1, 2, 3, 4],
 		'bidir': [True],
