@@ -15,6 +15,7 @@ from torch.utils import data
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from utils import Vocabulary, FastaDataset, collate
+from models import SeqLSTM
 
 def get_args():
 	parser = argparse.ArgumentParser(description='Bio-Sequence RNN Baselines')
@@ -25,6 +26,7 @@ def get_args():
 	parser.add_argument('--file', type=str, required=True, help='File to gris search results to')
 	parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA')
 	parser.add_argument('--num-folds', type=int, default=7, help='Number of folds for CV')
+	parser.add_argument('--epochs', type=int, default=20, help='Maximum number of epochs')
 
 	return parser.parse_args()
 
@@ -35,6 +37,7 @@ print("device = ", device)
 bsz = args.batch
 train_file = args.trn
 test_file = args.tst
+epochs = args.epochs
 output_file = args.file
 highest_auc = 0
 best_params = {}
@@ -43,53 +46,6 @@ num_folds = args.num_folds
 with open(output_file, 'w+') as f:
 	f.write("trn: {} tst: {}, batch: {}, out: {}".format(train_file,
 		test_file, bsz, output_file))
-
-class SeqLSTM(nn.Module):
-	# input_size = alphabet_size
-	def __init__(self, input_size, embedding_size, hidden_size, output_size, 
-			n_layers=1, bidir=False, embedding=None):
-
-		super(SeqLSTM, self).__init__()
-
-		self.input_size = input_size
-		self.embedding_size = embedding_size
-		self.hidden_size = hidden_size
-		self.output_size = output_size
-		self.n_layers = n_layers
-		self.num_dir = 2 if bidir else 1
-
-		# whether to use pre-trained embeddings
-		if embedding:
-			self.embedding = embedding
-		else:
-			self.embedding = nn.Embedding(num_embeddings=input_size, 
-				embedding_dim=embedding_size)
-
-		self.lstm = nn.LSTM(input_size=embedding_size, 
-			hidden_size=hidden_size, 
-			num_layers=n_layers, 
-			bidirectional=bidir)
-		self.fully_connected = nn.Linear(hidden_size, output_size)
-		self.softmax = nn.LogSoftmax(dim=1) 
-
-	def forward(self, x, lengths):
-		# assumes x ~ (sequence_len, batch)
-		batch_size = x.shape[1]
-		hidden = self.init_hidden(batch=batch_size)
-		embedded = self.embedding(x)
-		packed_embedded = pack_padded_sequence(embedded, lengths)
-		lstm_out, (h_final, c_final) = self.lstm(packed_embedded, hidden)
-		lstm_out = pad_packed_sequence(lstm_out)
-		logits = self.fully_connected(h_final[-1])
-
-		return logits
-
-	def init_hidden(self, batch):
-		h0 = torch.zeros(self.n_layers * self.num_dir, 
-			batch, self.hidden_size, device=device)
-		c0 = torch.zeros(self.n_layers * self.num_dir, 
-			batch, self.hidden_size, device=device)
-		return h0, c0
 
 def train_epoch(model, opt, train_loader):
 	num_batches = len(train_loader)
@@ -156,6 +112,7 @@ def run(params, trainset):
 	total_acc = 0
 	total_auc = 0
 
+	num_epochs = 0
 	for i in range(num_folds):
 		train, vali = trainset.get_fold(i)
 		train_loader = data.DataLoader(train, 
@@ -166,7 +123,7 @@ def run(params, trainset):
 			batch_size=bsz,
 			shuffle=False,
 			collate_fn=collate)
-		model = SeqLSTM(input_size=params['input_size'],
+		model = SeqLSTM(device=device, input_size=params['input_size'],
 			embedding_size=params['embedding_size'],
 			hidden_size=params['hidden_size'],
 			output_size=params['output_size'],
@@ -175,7 +132,8 @@ def run(params, trainset):
 			embedding=None).to(device)
 		opt = optim.Adam(model.parameters(), lr=params['lr'], weight_decay=0.0005)
 
-		for i in range(1, 21):
+		for i in range(1, epochs + 1):
+			num_epochs = i
 			train_loss = train_epoch(model, opt, train_loader)
 			vali_loss, acc, tpr, tnr, auc = evaluate(model, vali_loader)
 			# early stopping criterion
@@ -195,41 +153,31 @@ def run(params, trainset):
 	if (auc > highest_auc):
 		highest_auc = auc
 		best_params = params
+		best_params['num_epochs'] = num_epochs
 
 	with open(output_file, 'a+') as f:
-		f.write("\n\n" + str(params) + '\n' + result + '\n')
+		f.write("\n\n" + str(params) + 'num_epochs: ' + str(num_epochs) + '\n' + result + '\n')
 
 def run_best(trainset, testset):
-	trainset.split()
-	train, vali = trainset.get_fold(0)
-
-
-	train_loader = data.DataLoader(train, 
+	train_loader = data.DataLoader(trainset, 
 		batch_size=bsz, 
-		shuffle=False,
-		collate_fn=collate)
-	vali_loader = data.DataLoader(vali,
-		batch_size=bsz,
 		shuffle=False,
 		collate_fn=collate)
 	test_loader = data.DataLoader(testset,
 		batch_size=bsz,
 		shuffle=True,
 		collate_fn=collate)
-	model = SeqLSTM(input_size=best_params['input_size'],
+	model = SeqLSTM(device=device, input_size=best_params['input_size'],
 		embedding_size=best_params['embedding_size'],
 		hidden_size=best_params['hidden_size'],
 		output_size=best_params['output_size'],
 		n_layers=best_params['n_layers'],
 		bidir=best_params['bidir'],
 		embedding=None).to(device)
-	opt = optim.Adam(model.parameters(), lr=best_params['lr'])
+	opt = optim.Adam(model.parameters(), lr=best_params['lr'], weight_decay=0.0005)
 
-	for i in range(1, 21):
-		train_loss = train_epoch(model, opt, train_loader)
-		vali_loss, acc, tpr, tnr, auc = evaluate(model, vali_loader)
-		if vali_loss > train_loss:
-			break
+	for i in range(1, best_params['num_epochs']):
+		train_epoch(model, opt, train_loader)
 
 	test_loss, test_acc, test_tpr, test_tnr, test_auc = evaluate(model, test_loader)
 	result = "loss = {}, acc = {}, ".format(test_loss, test_acc)
@@ -248,11 +196,11 @@ def main():
 		'lr': [0.0001],
 		'input_size': [alphabet.size()], 
 		'embedding_size': [32, 64, 128, 256], 
-		'hidden_size': [64, 128, 256],
+		'hidden_size': [32, 64, 128, 256],
 		'output_size': [2],
 		'n_layers': [1, 2, 3, 4],
 		'bidir': [True],
-		'optimizer': ['Adam']
+		'optimizer': ['Adam'],
 	}
 
 	param_list = list(ParameterGrid(param_space))
